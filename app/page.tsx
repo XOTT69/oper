@@ -23,10 +23,15 @@ import {
 import { useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
-const monthlyData = [72, 76, 79, 78, 83, 87];
+const sampleMonthlyData = [
+  { score: 72, label: 'Кві' }, { score: 76, label: 'Тра' }, { score: 79, label: 'Чер' },
+  { score: 78, label: 'Лип' }, { score: 83, label: 'Сер' }, { score: 87, label: 'Вер' },
+];
 
 const metrics = [
   { label: 'Загальний бал', value: '87', note: '+4 за місяць', tone: 'text-emerald-700' },
@@ -40,6 +45,9 @@ const materials = [
   { title: 'Чекліст перевірки заявки', tag: 'Інструкція · 6 хв', action: 'Відкрити' },
   { title: 'Оновлення продуктів: вересень', tag: 'База знань · 12 хв', action: 'Вивчити' },
 ];
+
+type DashboardRow = { ldap: string; operator: string; periodLabel: string; scoreNumber: number | null; quality: string; kkdPercent: string; requests: string; periodKey: string };
+type Dashboard = { viewer: { ldap: string; operator: string; role: string }; rows: DashboardRow[] };
 
 function NavItem({ icon: Icon, label, active = false }: { icon: typeof House; label: string; active?: boolean }) {
   return (
@@ -56,6 +64,11 @@ function NavItem({ icon: Icon, label, active = false }: { icon: typeof House; la
 
 export default function Home() {
   const [completed, setCompleted] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [ldap, setLdap] = useState('');
+  const [loginMessage, setLoginMessage] = useState('');
+  const [loginPending, setLoginPending] = useState(false);
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: { registerTool?: (tool: unknown, options?: { signal: AbortSignal }) => void | Promise<void> } }).modelContext;
@@ -81,6 +94,34 @@ export default function Home() {
 
     return () => lifecycle.abort();
   }, []);
+
+  useEffect(() => {
+    void fetch('/api/dashboard').then(async (response) => response.ok ? response.json() as Promise<Dashboard> : null).then(setDashboard).catch(() => undefined);
+  }, []);
+
+  const ownRows = dashboard?.rows.filter((row) => row.ldap === dashboard.viewer.ldap) || [];
+  const latest = ownRows[0];
+  const visibleMetrics = latest ? [
+    { label: 'Загальний бал', value: latest.scoreNumber?.toString() || '—', note: 'за поточний період', tone: 'text-emerald-700' },
+    { label: 'Якість', value: latest.quality || '—', note: 'за поточний період', tone: 'text-emerald-700' },
+    { label: 'ККД', value: latest.kkdPercent || '—', note: 'за поточний період', tone: 'text-emerald-700' },
+    { label: 'Звернення', value: latest.requests || '—', note: 'за поточний період', tone: 'text-slate-500' },
+  ] : metrics;
+  const visibleMonthlyData = ownRows.length ? ownRows.slice(0, 6).reverse().map((row) => ({ score: row.scoreNumber || 0, label: row.periodLabel.slice(0, 3) })) : sampleMonthlyData;
+
+  async function requestLogin() {
+    setLoginPending(true);
+    setLoginMessage('');
+    try {
+      const response = await fetch('/api/auth/request-link', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ldap }) });
+      const body = await response.json() as { message?: string; error?: string };
+      setLoginMessage(body.message || body.error || 'Не вдалося почати вхід. Спробуйте ще раз.');
+    } catch {
+      setLoginMessage('Не вдалося з’єднатися з сервісом входу. Спробуйте ще раз.');
+    } finally {
+      setLoginPending(false);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-[#f4f7fb] text-slate-900">
@@ -131,11 +172,11 @@ export default function Home() {
                 <span className="rounded-full bg-blue-100 px-2.5 py-1 text-blue-700">Особистий кабінет</span>
                 <span className="flex items-center gap-1"><CalendarDays className="size-3.5" /> Вересень 2026</span>
               </div>
-              <h1 className="text-3xl font-black tracking-[-0.045em] sm:text-4xl">Доброго дня, Операторе</h1>
+              <h1 className="text-3xl font-black tracking-[-0.045em] sm:text-4xl">Доброго дня, {dashboard?.viewer.operator || 'Операторе'}</h1>
               <p className="mt-2 max-w-2xl text-base leading-6 text-slate-500">Твій результат зростає. Залишилось закріпити сильні сторони й прибрати повторювані помилки.</p>
             </div>
-            <Button className="h-11 rounded-xl bg-slate-950 px-4 text-sm font-bold hover:bg-slate-800">
-              <LogIn className="mr-2 size-4" /> Увійти через Slack
+            <Button onClick={() => { setLoginOpen(true); setLoginMessage(''); }} className="h-11 rounded-xl bg-slate-950 px-4 text-sm font-bold hover:bg-slate-800">
+              <LogIn className="mr-2 size-4" /> {dashboard ? 'Оновити Slack-вхід' : 'Увійти через Slack'}
             </Button>
           </header>
 
@@ -145,7 +186,7 @@ export default function Home() {
           </div>
 
           <div className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {metrics.map((metric) => (
+            {visibleMetrics.map((metric) => (
               <article key={metric.label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <p className="text-sm font-medium text-slate-500">{metric.label}</p>
                 <div className="mt-3 flex items-end justify-between gap-3">
@@ -170,11 +211,11 @@ export default function Home() {
                   <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50"><TrendingUp className="mr-1 size-3" /> +15</Badge>
                 </div>
                 <div className="mt-8 flex h-44 items-end justify-between gap-3 border-b border-slate-100 pb-1">
-                  {monthlyData.map((score, index) => (
-                    <div key={score} className="flex h-full flex-1 flex-col items-center justify-end gap-2">
-                      <span className="text-xs font-bold text-slate-600">{score}</span>
-                      <div className={`w-full max-w-10 rounded-t-xl ${index === monthlyData.length - 1 ? 'bg-gradient-to-t from-blue-600 to-indigo-500' : 'bg-blue-100'}`} style={{ height: `${score}%` }} />
-                      <span className="text-[11px] font-medium text-slate-400">{['Кві','Тра','Чер','Лип','Сер','Вер'][index]}</span>
+                  {visibleMonthlyData.map((item, index) => (
+                    <div key={`${item.label}-${index}`} className="flex h-full flex-1 flex-col items-center justify-end gap-2">
+                      <span className="text-xs font-bold text-slate-600">{item.score || '—'}</span>
+                      <div className={`w-full max-w-10 rounded-t-xl ${index === visibleMonthlyData.length - 1 ? 'bg-gradient-to-t from-blue-600 to-indigo-500' : 'bg-blue-100'}`} style={{ height: `${item.score}%` }} />
+                      <span className="text-[11px] font-medium text-slate-400">{item.label}</span>
                     </div>
                   ))}
                 </div>
@@ -209,6 +250,15 @@ export default function Home() {
             <div className="flex gap-4"><div className="grid size-11 shrink-0 place-items-center rounded-xl bg-emerald-50 text-emerald-600"><Check className="size-5" /></div><div><h2 className="font-extrabold">Міні-завдання на сьогодні</h2><p className="mt-1 text-sm leading-5 text-slate-500">Пройди чекліст перед закриттям трьох наступних заявок.</p></div></div>
             <Button onClick={() => setCompleted(!completed)} variant={completed ? 'secondary' : 'default'} className="mt-4 rounded-xl font-bold sm:mt-0">{completed ? 'Позначено виконаним' : 'Позначити виконаним'}</Button>
           </article>
+
+          <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
+            <DialogContent className="max-w-md rounded-2xl p-6" showCloseButton>
+              <DialogHeader><DialogTitle className="text-xl font-extrabold">Вхід через Slack</DialogTitle><DialogDescription>Вкажіть свій LDAP. Бот надішле одноразове посилання в особисті повідомлення Slack.</DialogDescription></DialogHeader>
+              <Input value={ldap} onChange={(event) => setLdap(event.target.value.toUpperCase())} placeholder="Наприклад, CC261100MAO" autoComplete="username" className="h-11 rounded-xl" />
+              {loginMessage && <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{loginMessage}</p>}
+              <DialogFooter><Button onClick={requestLogin} disabled={loginPending || !ldap} className="rounded-xl font-bold">{loginPending ? 'Надсилаємо…' : 'Надіслати посилання в Slack'}</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
         </section>
       </div>
     </main>
