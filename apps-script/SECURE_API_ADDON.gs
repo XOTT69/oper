@@ -215,13 +215,14 @@ function kpiGetAccessProfiles_() {
   let headerMap = null;
   let headerRowIndex = -1;
   for (let index = 0; index < Math.min(values.length, 40); index += 1) {
-    if (isOperatorsHeaderRow_(values[index])) { headerMap = buildHeaderMap_(values[index]); headerRowIndex = index; break; }
+    const candidateMap = buildHeaderMap_(values[index]);
+    if (kpiHasLdapHeader_(candidateMap)) { headerMap = candidateMap; headerRowIndex = index; break; }
   }
   if (!headerMap) return result;
 
   for (let index = headerRowIndex + 1; index < values.length; index += 1) {
     const row = values[index];
-    const ldap = kpiNormalizeLdap_(getByHeader_(row, headerMap, ['LDAP', 'лдап']));
+    const ldap = kpiGetLdapByHeader_(row, headerMap);
     if (!ldap) continue;
     const roleValue = cleanValue_(getByHeader_(row, headerMap, ['Роль', 'Role'])).toLowerCase();
     const role = roleValue === 'lead' || roleValue === 'керівник' ? 'lead' : roleValue === 'manager' || roleValue === 'менеджер' ? 'manager' : 'operator';
@@ -236,6 +237,21 @@ function kpiGetAccessProfiles_() {
     };
   }
   return result;
+}
+
+function kpiHasLdapHeader_(headerMap) {
+  return Object.keys(headerMap).some(header => {
+    const normalized = String(header).trim().toLowerCase();
+    return normalized === 'ldap' || normalized === 'лдап';
+  });
+}
+
+function kpiGetLdapByHeader_(row, headerMap) {
+  const ldapHeader = Object.keys(headerMap).find(header => {
+    const normalized = String(header).trim().toLowerCase();
+    return normalized === 'ldap' || normalized === 'лдап';
+  });
+  return ldapHeader ? kpiNormalizeLdap_(getByHeader_(row, headerMap, [ldapHeader])) : '';
 }
 
 function kpiGetAccessProfile_(ldap) {
