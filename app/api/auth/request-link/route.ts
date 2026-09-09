@@ -11,8 +11,10 @@ export async function POST(request: Request) {
   try {
     const loginBaseUrl = new URL('/api/auth/verify', request.url).toString();
     await callAppsScript('request_login', { ldap, loginBaseUrl });
-  } catch {
+  } catch (error) {
     // Do not disclose whether an LDAP exists or has a connected Slack account.
+    // The detail is retained in protected worker logs for the site owner only.
+    console.error('KPI login-link delivery failed:', error instanceof Error ? error.message : String(error));
   }
   return Response.json({ ok: true, message: 'Якщо доступ налаштовано, посилання вже надіслано в Slack.' }, { status: 202 });
 }
