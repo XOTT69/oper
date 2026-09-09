@@ -6,6 +6,7 @@
 
 const KPI_API_SECRET_PROPERTY = 'KPI_API_SECRET';
 const KPI_LOGIN_TOKENS_SHEET_NAME = 'KPI login tokens';
+const KPI_SLACK_CACHE_SHEET_NAME = 'KPI Slack cache';
 const KPI_SLACK_BOT_TOKEN_PROPERTY = 'SLACK_BOT_TOKEN';
 
 function doPost(e) {
@@ -29,18 +30,23 @@ function doPost(e) {
 function kpiRequestLogin_(request) {
   const ldap = kpiNormalizeLdap_(request.ldap);
   const profile = kpiGetAccessProfile_(ldap);
-  if (!profile || !profile.slackUserId) return kpiJson_({ ok: false, error: 'access is not configured' });
+  if (!profile) return kpiJson_({ ok: false, error: 'access is not configured' });
   const loginBaseUrl = String(request.loginBaseUrl || '');
   if (!/^https:\/\/[a-z0-9.-]+\/api\/auth\/verify$/i.test(loginBaseUrl)) return kpiJson_({ ok: false, error: 'invalid login url' });
 
+  const botToken = PropertiesService.getScriptProperties().getProperty(KPI_SLACK_BOT_TOKEN_PROPERTY);
+  if (!botToken) return kpiJson_({ ok: false, error: 'Slack bot is not configured' });
+  // Slack is the source of truth for the mapping: each user has an LDAP custom
+  // profile field. A manually supplied Slack ID is only an optional fallback.
+  const slackUserId = profile.slackUserId || kpiFindSlackUserIdByLdap_(ldap, botToken);
+  if (!slackUserId) return kpiJson_({ ok: false, error: 'Slack user is not configured' });
+
   const magicToken = kpiIssueLoginToken_(ldap);
-  kpiSendSlackLogin_(profile.slackUserId, loginBaseUrl + '?token=' + encodeURIComponent(magicToken));
+  kpiSendSlackLogin_(slackUserId, loginBaseUrl + '?token=' + encodeURIComponent(magicToken), botToken);
   return kpiJson_({ ok: true, data: { delivered: true } });
 }
 
-function kpiSendSlackLogin_(slackUserId, loginUrl) {
-  const botToken = PropertiesService.getScriptProperties().getProperty(KPI_SLACK_BOT_TOKEN_PROPERTY);
-  if (!botToken) throw new Error('Slack bot token is not configured');
+function kpiSendSlackLogin_(slackUserId, loginUrl, botToken) {
 
   const openResponse = kpiSlackRequest_('conversations.open', { users: slackUserId }, botToken);
   const channelId = openResponse && openResponse.channel && openResponse.channel.id;
@@ -54,6 +60,113 @@ function kpiSendSlackLogin_(slackUserId, loginUrl) {
       { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Відкрити KPI Кабінет' }, url: loginUrl, style: 'primary' }] }
     ]
   }, botToken);
+}
+
+function kpiFindSlackUserIdByLdap_(ldap, botToken) {
+  const cached = kpiGetCachedSlackUserId_(ldap);
+  if (cached) return cached;
+
+  let cursor = '';
+  do {
+    const url = 'https://slack.com/api/users.list?limit=200' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+    const response = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + botToken },
+      muteHttpExceptions: true
+    });
+    const body = JSON.parse(response.getContentText() || '{}');
+    if (!body.ok) throw new Error('Slack users list request failed');
+
+    const members = body.members || [];
+    for (let index = 0; index < members.length; index += 1) {
+      const member = members[index];
+      if (member.deleted || member.is_bot || !member.id) continue;
+      if (kpiProfileHasLdap_(member.profile, ldap)) {
+        kpiCacheSlackUserId_(ldap, member.id);
+        return member.id;
+      }
+    }
+    cursor = body.response_metadata && body.response_metadata.next_cursor ? body.response_metadata.next_cursor : '';
+  } while (cursor);
+
+  // Some Slack workspaces omit custom fields from users.list. In that case,
+  // read each public profile once; successful matches are cached in the KPI file.
+  cursor = '';
+  do {
+    const listUrl = 'https://slack.com/api/users.list?limit=200' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+    const listResponse = UrlFetchApp.fetch(listUrl, {
+      method: 'get', headers: { Authorization: 'Bearer ' + botToken }, muteHttpExceptions: true
+    });
+    const listBody = JSON.parse(listResponse.getContentText() || '{}');
+    if (!listBody.ok) throw new Error('Slack users list request failed');
+
+    const members = listBody.members || [];
+    for (let index = 0; index < members.length; index += 1) {
+      const member = members[index];
+      if (member.deleted || member.is_bot || !member.id) continue;
+      const profile = kpiGetSlackProfile_(member.id, botToken);
+      if (kpiProfileHasLdap_(profile, ldap)) {
+        kpiCacheSlackUserId_(ldap, member.id);
+        return member.id;
+      }
+    }
+    cursor = listBody.response_metadata && listBody.response_metadata.next_cursor ? listBody.response_metadata.next_cursor : '';
+  } while (cursor);
+
+  return '';
+}
+
+function kpiGetSlackProfile_(slackUserId, botToken) {
+  const response = UrlFetchApp.fetch('https://slack.com/api/users.profile.get?user=' + encodeURIComponent(slackUserId), {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + botToken },
+    muteHttpExceptions: true
+  });
+  const body = JSON.parse(response.getContentText() || '{}');
+  return body.ok && body.profile ? body.profile : {};
+}
+
+function kpiProfileHasLdap_(profile, ldap) {
+  const fields = profile && profile.fields ? profile.fields : {};
+  const target = kpiNormalizeLdap_(ldap);
+  return Object.keys(fields).some(fieldId => {
+    const field = fields[fieldId] || {};
+    return kpiNormalizeLdap_(field.value) === target || kpiNormalizeLdap_(field.alt) === target;
+  });
+}
+
+function kpiGetCachedSlackUserId_(ldap) {
+  const sheet = kpiGetSlackCacheSheet_();
+  const values = sheet.getDataRange().getDisplayValues();
+  const threshold = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  for (let index = 1; index < values.length; index += 1) {
+    if (kpiNormalizeLdap_(values[index][0]) !== ldap) continue;
+    const updatedAt = new Date(values[index][2]).getTime();
+    if (values[index][1] && updatedAt >= threshold) return values[index][1];
+  }
+  return '';
+}
+
+function kpiCacheSlackUserId_(ldap, slackUserId) {
+  const sheet = kpiGetSlackCacheSheet_();
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    if (kpiNormalizeLdap_(values[index][0]) === ldap) {
+      sheet.getRange(index + 1, 2, 1, 2).setValues([[slackUserId, new Date()]]);
+      return;
+    }
+  }
+  sheet.appendRow([ldap, slackUserId, new Date()]);
+}
+
+function kpiGetSlackCacheSheet_() {
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_SLACK_CACHE_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_SLACK_CACHE_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Slack User ID', 'Updated at']);
+  }
+  return sheet;
 }
 
 function kpiSlackRequest_(method, payload, botToken) {
