@@ -123,6 +123,28 @@ export default function Home() {
     }
   }
 
+  if (!dashboard) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f4f7fb] px-4 py-8 text-slate-900">
+        <section className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/60 sm:p-8">
+          <div className="grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-200">
+            <LockKeyhole className="size-6" />
+          </div>
+          <p className="mt-6 text-sm font-bold uppercase tracking-[0.14em] text-blue-700">KPI Кабінет</p>
+          <h1 className="mt-2 text-3xl font-black tracking-[-0.045em]">Вхід для оператора</h1>
+          <p className="mt-3 text-base leading-6 text-slate-500">Вкажіть свій LDAP. Якщо доступ надано, бот надішле одноразове посилання в особисті повідомлення Slack.</p>
+          <label className="mt-7 block text-sm font-bold text-slate-700" htmlFor="ldap">LDAP</label>
+          <Input id="ldap" value={ldap} onChange={(event) => setLdap(event.target.value.toUpperCase())} placeholder="Наприклад, CC261100MAO" autoComplete="username" className="mt-2 h-12 rounded-xl" />
+          {loginMessage && <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600" role="status">{loginMessage}</p>}
+          <Button onClick={requestLogin} disabled={loginPending || !ldap} className="mt-5 h-12 w-full rounded-xl bg-slate-950 text-sm font-bold hover:bg-slate-800">
+            <LogIn className="mr-2 size-4" /> {loginPending ? 'Надсилаємо…' : 'Надіслати посилання в Slack'}
+          </Button>
+          <div className="mt-5 flex items-start gap-2 rounded-xl bg-blue-50 p-3 text-sm leading-5 text-blue-900"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-blue-600" /> Дані KPI з’являться лише після успішного входу.</div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-[#f4f7fb] text-slate-900">
       <div className="mx-auto grid min-h-screen max-w-[1560px] grid-cols-1 lg:grid-cols-[248px_minmax(0,1fr)]">
