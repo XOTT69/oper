@@ -215,11 +215,13 @@ export default function Home() {
   const adminDirections = [...new Set(adminProfiles.map((profile) => profile.direction).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'uk'));
   const directionPriority = (direction: string | undefined) => {
     const value = String(direction || '').toLowerCase();
-    if (value.includes('телефонія')) return 0;
-    if (value.includes('телефон')) return 1;
+    if (value.includes('телефон')) return 0;
+    if (value.includes('чат')) return 1;
     return 2;
   };
   const visibleAdminProfiles = adminProfiles.filter((profile) => !adminDirection || profile.direction === adminDirection).sort((a, b) => {
+    const accessDifference = Number(a.accessEnabled === false) - Number(b.accessEnabled === false);
+    if (accessDifference) return accessDifference;
     if (adminOrder === 'score') return (latestRowByLdap.get(b.ldap)?.scoreNumber || -1) - (latestRowByLdap.get(a.ldap)?.scoreNumber || -1);
     if (adminOrder === 'name') return String(a.operator || '').localeCompare(String(b.operator || ''), 'uk');
     return directionPriority(a.direction) - directionPriority(b.direction) || String(a.operator || '').localeCompare(String(b.operator || ''), 'uk');
