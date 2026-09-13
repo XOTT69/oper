@@ -17,7 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { HelpfulLinks, OperatorPreview, type HelpfulLink } from '@/components/operator-preview';
+import { HelpfulLinks, OperatorPreview, type DevelopmentPlan, type HelpfulLink, type KpiTarget } from '@/components/operator-preview';
 
 type Recommendation = { title: string; text: string };
 type ErrorTheme = { name: string; count: number };
@@ -41,6 +41,7 @@ type DashboardRow = {
   warningsCount?: number;
   errorsTotal?: number;
   errorExamples?: { type: string; category: string; date: string; text: string }[];
+  independence?: string;
 };
 type AccessProfile = { ldap: string; operator: string; direction?: string; team?: string; role?: string; level?: string; status?: string; independence?: string; hasKpi?: boolean; accessEnabled?: boolean };
 type Dashboard = {
@@ -50,6 +51,8 @@ type Dashboard = {
   accessProfiles?: AccessProfile[];
   helpfulLinks?: HelpfulLink[];
   adminLinks?: HelpfulLink[];
+  developmentPlans?: DevelopmentPlan[];
+  kpiTargets?: KpiTarget[];
 };
 
 function NavItem({ icon: Icon, label, active = false, onClick }: { icon: typeof House; label: string; active?: boolean; onClick: () => void }) {
@@ -81,6 +84,13 @@ export default function Home() {
   const [linkUrl, setLinkUrl] = useState('');
   const [linkAudience, setLinkAudience] = useState('ALL');
   const [linkPending, setLinkPending] = useState(false);
+  const [planLdap, setPlanLdap] = useState('');
+  const [planTask, setPlanTask] = useState('');
+  const [planPending, setPlanPending] = useState(false);
+  const [targetDirection, setTargetDirection] = useState('ALL');
+  const [targetMetric, setTargetMetric] = useState('');
+  const [targetValue, setTargetValue] = useState('');
+  const [targetPending, setTargetPending] = useState(false);
   const [ownPeriod, setOwnPeriod] = useState('');
   const [previewPeriod, setPreviewPeriod] = useState('');
   const [adminPeriod, setAdminPeriod] = useState('');
@@ -91,7 +101,10 @@ export default function Home() {
   useEffect(() => {
     void fetch('/api/dashboard')
       .then(async (response) => response.ok ? response.json() as Promise<Dashboard> : null)
-      .then(setDashboard)
+      .then((data) => {
+        setDashboard(data);
+        if (data?.latestPeriodKey) setAdminPeriod((current) => current || data.latestPeriodKey || '');
+      })
       .catch(() => undefined)
       .finally(() => setDashboardLoading(false));
   }, []);
@@ -143,15 +156,17 @@ export default function Home() {
     }
   }
 
-  async function saveIndependence(profile: AccessProfile) {
-    const independence = independenceDrafts[profile.ldap] ?? profile.independence ?? '';
+  async function saveIndependence(profile: AccessProfile, periodKey: string, fallback: string) {
+    if (!periodKey) { setAccessMessage('Спершу оберіть місяць KPI.'); return; }
+    const draftKey = `${profile.ldap}|${periodKey}`;
+    const independence = independenceDrafts[draftKey] ?? fallback;
     setIndependencePending(profile.ldap); setAccessMessage('');
     try {
-      const response = await fetch('/api/admin/independence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ldap: profile.ldap, independence }) });
+      const response = await fetch('/api/admin/independence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ldap: profile.ldap, periodKey, independence }) });
       const body = await response.json() as { error?: string };
       if (!response.ok) throw new Error(body.error || 'Не вдалося зберегти рівень самостійності.');
-      setDashboard((current) => current ? { ...current, accessProfiles: current.accessProfiles?.map((item) => item.ldap === profile.ldap ? { ...item, independence } : item) } : current);
-      setAccessMessage(`Рівень самостійності для ${profile.ldap} збережено.`);
+      setDashboard((current) => current ? { ...current, rows: current.rows.map((item) => item.ldap === profile.ldap && item.periodKey === periodKey ? { ...item, independence } : item) } : current);
+      setAccessMessage(`Самостійність для ${profile.ldap} за ${periodKey} збережено.`);
     } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося зберегти зміни.'); } finally { setIndependencePending(null); }
   }
 
@@ -165,6 +180,29 @@ export default function Home() {
       setDashboard((current) => current ? { ...current, adminLinks: [...(current.adminLinks || []), link], helpfulLinks: link.audience === 'ALL' || link.audience === current.viewer.ldap ? [...(current.helpfulLinks || []), link] : current.helpfulLinks } : current);
       setLinkTitle(''); setLinkUrl(''); setLinkAudience('ALL'); setAccessMessage('Корисне посилання додано.');
     } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося додати посилання.'); } finally { setLinkPending(false); }
+  }
+
+  async function addDevelopmentPlan() {
+    if (!adminPeriod) { setAccessMessage('Спершу оберіть місяць KPI для плану донавчання.'); return; }
+    setPlanPending(true); setAccessMessage('');
+    try {
+      const response = await fetch('/api/admin/development-plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ldap: planLdap, periodKey: adminPeriod, task: planTask }) });
+      const body = await response.json() as DevelopmentPlan & { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Не вдалося додати крок донавчання.');
+      setDashboard((current) => current ? { ...current, developmentPlans: [...(current.developmentPlans || []), body] } : current);
+      setPlanTask(''); setAccessMessage(`План донавчання для ${body.ldap} додано.`);
+    } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося додати крок донавчання.'); } finally { setPlanPending(false); }
+  }
+
+  async function saveKpiTarget() {
+    setTargetPending(true); setAccessMessage('');
+    try {
+      const response = await fetch('/api/admin/kpi-target', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ direction: targetDirection, metric: targetMetric, target: targetValue }) });
+      const body = await response.json() as KpiTarget & { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Не вдалося зберегти ціль KPI.');
+      setDashboard((current) => current ? { ...current, kpiTargets: [...(current.kpiTargets || []).filter((item) => !(item.direction === body.direction && item.metric.toLowerCase() === body.metric.toLowerCase())), body] } : current);
+      setTargetMetric(''); setTargetValue(''); setAccessMessage('Ціль KPI збережено.');
+    } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося зберегти ціль KPI.'); } finally { setTargetPending(false); }
   }
 
   if (!dashboard && dashboardLoading) {
@@ -207,7 +245,7 @@ export default function Home() {
   const selectedRows = selectedProfile ? dashboard.rows.filter((row) => row.ldap === selectedProfile.ldap) : [];
   const selectedLinks = selectedProfile ? (dashboard.adminLinks || []).filter((link) => link.active !== false && (link.audience === 'ALL' || link.audience === selectedProfile.ldap)) : [];
   const adminPeriods = [...new Map(dashboard.rows.map((row) => [row.periodKey, row.periodLabel])).entries()].sort(([a], [b]) => b.localeCompare(a));
-  const rowsForAdminPeriod = adminPeriod ? dashboard.rows.filter((row) => row.periodKey === adminPeriod) : dashboard.rows;
+  const rowsForAdminPeriod = adminPeriod ? dashboard.rows.filter((row) => row.periodKey === adminPeriod) : [];
   const latestRowByLdap = new Map<string, DashboardRow>();
   rowsForAdminPeriod.forEach((row) => {
     if (!latestRowByLdap.has(row.ldap)) latestRowByLdap.set(row.ldap, row);
@@ -242,6 +280,8 @@ export default function Home() {
             {isAdmin && <NavItem icon={BookOpen} label="Адміністрування" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />}
           </nav>
 
+          <HelpfulLinks links={dashboard.helpfulLinks || []} compact />
+
           <div className="mt-7 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-950">
             <div className="flex items-center gap-2 text-sm font-bold"><ShieldCheck className="size-4 text-emerald-600" /> Slack-вхід підтверджено</div>
             <p className="mt-2 text-xs leading-5 text-emerald-800">Сесія захищена. Дані видимі лише відповідно до вашої ролі.</p>
@@ -275,7 +315,7 @@ export default function Home() {
             </TabsList>
 
             <TabsContent value="overview" className="mt-5">
-              <OperatorPreview profile={{ ldap: dashboard.viewer.ldap, operator: dashboard.viewer.operator, direction: dashboard.viewer.direction }} rows={ownRows} links={dashboard.helpfulLinks || []} selectedPeriod={ownPeriod} onSelectPeriod={setOwnPeriod} />
+              <OperatorPreview profile={{ ldap: dashboard.viewer.ldap, operator: dashboard.viewer.operator, direction: dashboard.viewer.direction }} rows={ownRows} links={dashboard.helpfulLinks || []} plans={dashboard.developmentPlans || []} targets={dashboard.kpiTargets || []} selectedPeriod={ownPeriod} onSelectPeriod={setOwnPeriod} />
             </TabsContent>
 
             <TabsContent value="recommendations" className="mt-5 grid gap-4 xl:grid-cols-2">
@@ -285,11 +325,12 @@ export default function Home() {
             </TabsContent>
 
             {isAdmin && <TabsContent value="admin" className="mt-5">
-              <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-xl font-extrabold">Доступ операторів</h2><p className="mt-1 text-sm leading-6 text-slate-500">Тут можна надати або вимкнути доступ за LDAP. Стан перевіряється сервером — вимкнений оператор не отримає посилання в Slack і не відкриє KPI.</p></div><div className="flex flex-wrap items-end gap-3"><label className="grid gap-1 text-sm font-bold text-slate-700">Період KPI<select value={adminPeriod} onChange={(event) => setAdminPeriod(event.target.value)} className="h-10 min-w-48 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="">Останні доступні</option>{adminPeriods.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label className="grid gap-1 text-sm font-bold text-slate-700">Напрямок<select value={adminDirection} onChange={(event) => setAdminDirection(event.target.value)} className="h-10 min-w-40 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="">Усі напрямки</option>{adminDirections.map((direction) => <option key={direction} value={direction}>{direction}</option>)}</select></label><label className="grid gap-1 text-sm font-bold text-slate-700">Порядок<select value={adminOrder} onChange={(event) => setAdminOrder(event.target.value)} className="h-10 min-w-44 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="direction">Напрямок</option><option value="score">Бал: вищий перший</option><option value="name">За ПІБ</option></select></label><Badge className="mb-0.5 w-fit bg-slate-100 text-slate-700 hover:bg-slate-100">{enabledProfiles.length} з {adminProfiles.length} активні</Badge></div></div>
+              <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-xl font-extrabold">Доступ операторів</h2><p className="mt-1 text-sm leading-6 text-slate-500">Тут можна надати або вимкнути доступ за LDAP. Обраний місяць застосовується до KPI та рівня самостійності — кожне значення зберігається окремо за період.</p></div><div className="flex flex-wrap items-end gap-3"><label className="grid gap-1 text-sm font-bold text-slate-700">Період KPI<select value={adminPeriod} onChange={(event) => setAdminPeriod(event.target.value)} className="h-10 min-w-48 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="">Оберіть місяць</option>{adminPeriods.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label className="grid gap-1 text-sm font-bold text-slate-700">Напрямок<select value={adminDirection} onChange={(event) => setAdminDirection(event.target.value)} className="h-10 min-w-40 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="">Усі напрямки</option>{adminDirections.map((direction) => <option key={direction} value={direction}>{direction}</option>)}</select></label><label className="grid gap-1 text-sm font-bold text-slate-700">Порядок<select value={adminOrder} onChange={(event) => setAdminOrder(event.target.value)} className="h-10 min-w-44 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500"><option value="direction">Напрямок</option><option value="score">Бал: вищий перший</option><option value="name">За ПІБ</option></select></label><Badge className="mb-0.5 w-fit bg-slate-100 text-slate-700 hover:bg-slate-100">{enabledProfiles.length} з {adminProfiles.length} активні</Badge></div></div>
                 {accessMessage && <p className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-700" role="status">{accessMessage}</p>}
-                {adminProfiles.length > 0 ? <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[1060px] text-left text-sm"><thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-3 py-3 font-bold">Оператор</th><th className="px-3 py-3 font-bold">LDAP</th><th className="px-3 py-3 font-bold">KPI</th><th className="px-3 py-3 font-bold">Самостійність</th><th className="px-3 py-3 font-bold">Доступ</th><th className="px-3 py-3 font-bold">Дії</th></tr></thead><tbody>{visibleAdminProfiles.map((profile) => { const row = latestRowByLdap.get(profile.ldap); const accessEnabled = profile.accessEnabled !== false; const ownAdmin = profile.ldap === dashboard.viewer.ldap; const draft = independenceDrafts[profile.ldap] ?? profile.independence ?? ''; return <tr key={profile.ldap} className="border-b border-slate-100 last:border-0"><td className="px-3 py-3 font-semibold">{profile.operator || '—'}<p className="mt-0.5 text-xs font-normal text-slate-500">{profile.direction || '—'}</p></td><td className="px-3 py-3 font-mono text-xs text-slate-600">{profile.ldap}</td><td className="px-3 py-3"><p className="font-bold">{row?.scoreNumber ?? '—'}</p><p className="text-xs text-slate-500">{row?.periodLabel || 'дані не внесено'}</p></td><td className="px-3 py-3"><div className="flex min-w-56 gap-2"><Input aria-label={`Рівень самостійності ${profile.ldap}`} value={draft} onChange={(event) => setIndependenceDrafts((current) => ({ ...current, [profile.ldap]: event.target.value }))} placeholder="Наприклад, самостійно" className="h-9" /><Button type="button" size="sm" variant="outline" disabled={independencePending === profile.ldap} onClick={() => void saveIndependence(profile)}>{independencePending === profile.ldap ? '…' : 'Зберегти'}</Button></div></td><td className="px-3 py-3"><Badge className={accessEnabled ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-100' : 'bg-slate-100 text-slate-600 hover:bg-slate-100'}>{accessEnabled ? 'Надано' : 'Вимкнено'}</Badge></td><td className="px-3 py-3"><div className="flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { setPreviewLdap(profile.ldap); setPreviewPeriod(''); }}>Перегляд</Button><Button type="button" size="sm" variant={accessEnabled ? 'outline' : 'default'} disabled={accessPending === profile.ldap || (ownAdmin && accessEnabled)} onClick={() => void setOperatorAccess(profile, !accessEnabled)}>{accessPending === profile.ldap ? '…' : ownAdmin && accessEnabled ? 'Ваш доступ' : accessEnabled ? 'Вимкнути' : 'Надати'}</Button></div></td></tr>; })}</tbody></table>{visibleAdminProfiles.length === 0 && <p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">За цим фільтром операторів немає.</p>}</div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Список операторів ще не надійшов із захищеного сервісу KPI.</p>}</article>
+                {adminProfiles.length > 0 ? <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[1060px] text-left text-sm"><thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-3 py-3 font-bold">Оператор</th><th className="px-3 py-3 font-bold">LDAP</th><th className="px-3 py-3 font-bold">KPI</th><th className="px-3 py-3 font-bold">Самостійність</th><th className="px-3 py-3 font-bold">Доступ</th><th className="px-3 py-3 font-bold">Дії</th></tr></thead><tbody>{visibleAdminProfiles.map((profile) => { const row = latestRowByLdap.get(profile.ldap); const accessEnabled = profile.accessEnabled !== false; const ownAdmin = profile.ldap === dashboard.viewer.ldap; const draftKey = `${profile.ldap}|${adminPeriod}`; const fallback = row?.independence ?? profile.independence ?? ''; const draft = independenceDrafts[draftKey] ?? fallback; return <tr key={profile.ldap} className="border-b border-slate-100 last:border-0"><td className="px-3 py-3 font-semibold">{profile.operator || '—'}<p className="mt-0.5 text-xs font-normal text-slate-500">{profile.direction || '—'}</p></td><td className="px-3 py-3 font-mono text-xs text-slate-600">{profile.ldap}</td><td className="px-3 py-3"><p className="font-bold">{row?.scoreNumber ?? '—'}</p><p className="text-xs text-slate-500">{row?.periodLabel || 'дані не внесено'}</p></td><td className="px-3 py-3"><div className="flex min-w-56 gap-2"><Input aria-label={`Рівень самостійності ${profile.ldap} за ${adminPeriod || 'обраний місяць'}`} value={draft} onChange={(event) => setIndependenceDrafts((current) => ({ ...current, [draftKey]: event.target.value }))} placeholder="Наприклад, самостійно" className="h-9" /><Button type="button" size="sm" variant="outline" disabled={!adminPeriod || independencePending === profile.ldap} onClick={() => void saveIndependence(profile, adminPeriod, fallback)}>{independencePending === profile.ldap ? '…' : 'Зберегти'}</Button></div></td><td className="px-3 py-3"><Badge className={accessEnabled ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-100' : 'bg-slate-100 text-slate-600 hover:bg-slate-100'}>{accessEnabled ? 'Надано' : 'Вимкнено'}</Badge></td><td className="px-3 py-3"><div className="flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { setPreviewLdap(profile.ldap); setPreviewPeriod(adminPeriod); }}>Перегляд</Button><Button type="button" size="sm" variant={accessEnabled ? 'outline' : 'default'} disabled={accessPending === profile.ldap || (ownAdmin && accessEnabled)} onClick={() => void setOperatorAccess(profile, !accessEnabled)}>{accessPending === profile.ldap ? '…' : ownAdmin && accessEnabled ? 'Ваш доступ' : accessEnabled ? 'Вимкнути' : 'Надати'}</Button></div></td></tr>; })}</tbody></table>{visibleAdminProfiles.length === 0 && <p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">За цим фільтром операторів немає.</p>}</div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Список операторів ще не надійшов із захищеного сервісу KPI.</p>}</article>
               <article className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><h2 className="text-xl font-extrabold">Додати корисне посилання</h2><p className="mt-1 text-sm text-slate-500">Воно з’явиться лише для вказаного LDAP або для всіх операторів.</p><div className="mt-4 grid gap-3 md:grid-cols-[1fr_1.4fr_180px_auto]"><Input value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Назва, наприклад База знань" /><Input value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" inputMode="url" /><Input value={linkAudience} onChange={(event) => setLinkAudience(event.target.value.toUpperCase())} placeholder="ALL або LDAP" /><Button type="button" disabled={linkPending || !linkTitle || !linkUrl} onClick={() => void addHelpfulLink()}>{linkPending ? 'Додаємо…' : 'Додати'}</Button></div><p className="mt-2 text-xs text-slate-500">ALL — усім операторам. Для конкретної людини введіть її LDAP.</p></article>
-              {selectedProfile && <div ref={previewRef} className="mt-5"><OperatorPreview title="Перегляд кабінету оператора" profile={selectedProfile} rows={selectedRows} links={selectedLinks} selectedPeriod={previewPeriod} onSelectPeriod={setPreviewPeriod} /></div>}
+              <article className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><h2 className="text-xl font-extrabold">Цілі та донавчання</h2><p className="mt-1 text-sm text-slate-500">Цілі відображаються операторам їхнього напрямку. Крок донавчання додається на обраний зверху місяць.</p><div className="mt-4 grid gap-3 lg:grid-cols-2"><div className="rounded-xl bg-slate-50 p-4"><p className="text-sm font-bold">Ціль KPI</p><div className="mt-3 grid gap-2 sm:grid-cols-3"><Input value={targetDirection} onChange={(event) => setTargetDirection(event.target.value || 'ALL')} placeholder="Напрямок або ALL" /><Input value={targetMetric} onChange={(event) => setTargetMetric(event.target.value)} placeholder="Показник, напр. SL" /><Input value={targetValue} onChange={(event) => setTargetValue(event.target.value)} placeholder="Ціль, напр. ≥95" /></div><Button type="button" className="mt-3" disabled={targetPending || !targetMetric || !targetValue} onClick={() => void saveKpiTarget()}>{targetPending ? 'Зберігаємо…' : 'Зберегти ціль'}</Button></div><div className="rounded-xl bg-slate-50 p-4"><p className="text-sm font-bold">Персональний крок донавчання</p><div className="mt-3 grid gap-2 sm:grid-cols-2"><Input value={planLdap} onChange={(event) => setPlanLdap(event.target.value.toUpperCase())} placeholder="LDAP оператора" /><Input value={planTask} onChange={(event) => setPlanTask(event.target.value)} placeholder="Напр. пройти модуль по ВК" /></div><Button type="button" className="mt-3" disabled={planPending || !adminPeriod || !planLdap || !planTask} onClick={() => void addDevelopmentPlan()}>{planPending ? 'Додаємо…' : 'Додати до плану'}</Button></div></div></article>
+              {selectedProfile && <div ref={previewRef} className="mt-5"><OperatorPreview title="Перегляд кабінету оператора" profile={selectedProfile} rows={selectedRows} links={selectedLinks} plans={(dashboard.developmentPlans || []).filter((plan) => plan.ldap === selectedProfile.ldap)} targets={dashboard.kpiTargets || []} selectedPeriod={previewPeriod} onSelectPeriod={setPreviewPeriod} /></div>}
             </TabsContent>}
           </Tabs>
         </section>

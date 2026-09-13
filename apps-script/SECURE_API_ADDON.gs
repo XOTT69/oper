@@ -11,7 +11,11 @@ const KPI_SLACK_BOT_TOKEN_PROPERTY = 'SLACK_BOT_TOKEN';
 const KPI_ADMIN_LDAPS_PROPERTY = 'KPI_ADMIN_LDAPS';
 const KPI_ACCESS_SHEET_NAME = 'KPI access';
 const KPI_OPERATOR_SETTINGS_SHEET_NAME = 'KPI cabinet profiles';
+const KPI_PERIOD_INDEPENDENCE_SHEET_NAME = 'KPI independence by period';
 const KPI_USEFUL_LINKS_SHEET_NAME = 'KPI useful links';
+const KPI_DEVELOPMENT_PLANS_SHEET_NAME = 'KPI development plans';
+const KPI_TARGETS_SHEET_NAME = 'KPI targets';
+const KPI_AUDIT_SHEET_NAME = 'KPI cabinet audit';
 
 function doPost(e) {
   try {
@@ -26,6 +30,8 @@ function doPost(e) {
       case 'set_access': return kpiSetAccess_(request);
       case 'set_independence': return kpiSetIndependence_(request);
       case 'add_useful_link': return kpiAddUsefulLink_(request);
+      case 'add_development_plan': return kpiAddDevelopmentPlan_(request);
+      case 'set_kpi_target': return kpiSetKpiTarget_(request);
       default: return kpiJson_({ ok: false, error: 'unknown action' });
     }
   } catch (error) {
@@ -204,11 +210,41 @@ function kpiGetPrivateDashboard_(request) {
   const profiles = kpiGetAccessProfiles_();
   const allowedLdaps = kpiAllowedLdaps_(viewer, profiles);
   const dashboard = getKpiDashboard();
-  const rows = (dashboard.rows || []).filter(row => allowedLdaps[row.ldap.toUpperCase()]);
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  const periodContent = kpiBuildPeriodContent_(ss, dashboard.rows || []);
+  const legacyIndependence = kpiGetOperatorSettingsMap_(ss);
+  const periodIndependence = kpiGetPeriodIndependenceMap_(ss);
+
+  // The legacy Web.gs dashboard is deliberately normalized here. This keeps
+  // the existing public dashboard untouched while the private cabinet always
+  // uses one unambiguous period for recommendations, errors and independence.
+  const normalizedRows = (dashboard.rows || []).map(row => {
+    const ldapKey = kpiNormalizeLdap_(row.ldap);
+    const key = kpiPeriodLdapKey_(ldapKey, row.periodKey);
+    const errors = periodContent.errors[key] || kpiEmptyErrors_();
+    const recommendations = (periodContent.recommendations.global[ldapKey] || [])
+      .concat(periodContent.recommendations.byPeriod[key] || []);
+
+    row.critsCount = errors.crits;
+    row.warningsCount = errors.warnings;
+    row.errorsTotal = errors.total;
+    row.errorThemes = Object.keys(errors.themes).map(name => ({ name: name, count: errors.themes[name] }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'uk'));
+    row.errorExamples = errors.examples;
+    row.errorAdvice = buildErrorAdvice_(errors);
+    row.recommendations = recommendations;
+    row.recommendationsCount = recommendations.length;
+    row.independence = kpiGetIndependenceForPeriod_(periodIndependence, legacyIndependence, ldapKey, row.periodKey);
+    return row;
+  });
+
+  const rows = normalizedRows.filter(row => allowedLdaps[kpiNormalizeLdap_(row.ldap)]);
   const periodsMap = {};
   rows.forEach(row => { periodsMap[row.periodKey] = { key: row.periodKey, label: row.periodLabel, year: row.year, month: row.month }; });
   const periods = Object.keys(periodsMap).map(key => periodsMap[key]).sort((a, b) => b.key.localeCompare(a.key));
   const helpfulLinks = kpiGetUsefulLinks_(viewer.ldap, false);
+  const developmentPlans = kpiGetDevelopmentPlans_(ss, viewer.role === 'admin' ? Object.keys(allowedLdaps) : [viewer.ldap]);
+  const kpiTargets = kpiGetKpiTargets_(ss, viewer.role === 'admin' ? '' : viewer.direction);
   const accessProfiles = viewer.role === 'admin'
     ? Object.keys(profiles).map(profileLdap => ({
       ldap: profiles[profileLdap].ldap,
@@ -220,12 +256,12 @@ function kpiGetPrivateDashboard_(request) {
       role: profiles[profileLdap].role,
       independence: profiles[profileLdap].independence,
       accessEnabled: profiles[profileLdap].accessEnabled,
-      hasKpi: (dashboard.rows || []).some(row => row.ldap.toUpperCase() === profileLdap)
+      hasKpi: normalizedRows.some(row => kpiNormalizeLdap_(row.ldap) === profileLdap)
     })).sort((a, b) => String(a.operator || '').localeCompare(String(b.operator || ''), 'uk'))
     : [];
 
   const adminLinks = viewer.role === 'admin' ? kpiGetUsefulLinks_(viewer.ldap, true) : [];
-  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '', helpfulLinks: helpfulLinks, accessProfiles: accessProfiles, adminLinks: adminLinks } });
+  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '', helpfulLinks: helpfulLinks, accessProfiles: accessProfiles, adminLinks: adminLinks, developmentPlans: developmentPlans, kpiTargets: kpiTargets, dataQuality: periodContent.diagnostics } });
 }
 
 function kpiGetAccessProfiles_() {
@@ -358,10 +394,12 @@ function kpiSetAccess_(request) {
   for (let index = 1; index < values.length; index += 1) {
     if (kpiNormalizeLdap_(values[index][0]) === targetLdap) {
       sheet.getRange(index + 1, 2, 1, 2).setValues([[enabled ? 'так' : 'ні', new Date()]]);
+      kpiAudit_(viewer.ldap, targetLdap, enabled ? 'Доступ надано' : 'Доступ вимкнено', '', '');
       return kpiJson_({ ok: true, data: { ldap: targetLdap, accessEnabled: enabled } });
     }
   }
   sheet.appendRow([targetLdap, enabled ? 'так' : 'ні', new Date()]);
+  kpiAudit_(viewer.ldap, targetLdap, enabled ? 'Доступ надано' : 'Доступ вимкнено', '', '');
   return kpiJson_({ ok: true, data: { ldap: targetLdap, accessEnabled: enabled } });
 }
 
@@ -390,25 +428,221 @@ function kpiSetIndependence_(request) {
   const viewer = kpiGetAccessProfile_(request.viewerLdap);
   if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
   const targetLdap = kpiNormalizeLdap_(request.targetLdap);
+  const periodKey = kpiNormalizePeriodKey_(request.periodKey);
   const independence = String(request.independence || '').trim().slice(0, 120);
   const profiles = kpiGetAccessProfiles_();
   if (!targetLdap || !profiles[targetLdap]) return kpiJson_({ ok: false, error: 'LDAP не знайдено серед операторів' });
+  if (!periodKey) return kpiJson_({ ok: false, error: 'Оберіть коректний місяць KPI' });
 
   const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
-  let sheet = ss.getSheetByName(KPI_OPERATOR_SETTINGS_SHEET_NAME);
+  let sheet = ss.getSheetByName(KPI_PERIOD_INDEPENDENCE_SHEET_NAME);
   if (!sheet) {
-    sheet = ss.insertSheet(KPI_OPERATOR_SETTINGS_SHEET_NAME);
-    sheet.appendRow(['LDAP', 'Рівень самостійності', 'Оновлено']);
+    sheet = ss.insertSheet(KPI_PERIOD_INDEPENDENCE_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Період', 'Рівень самостійності', 'Оновлено']);
   }
   const values = sheet.getDataRange().getDisplayValues();
   for (let index = 1; index < values.length; index += 1) {
-    if (kpiNormalizeLdap_(values[index][0]) === targetLdap) {
-      sheet.getRange(index + 1, 2, 1, 2).setValues([[independence, new Date()]]);
-      return kpiJson_({ ok: true, data: { ldap: targetLdap, independence: independence } });
+    if (kpiNormalizeLdap_(values[index][0]) === targetLdap && kpiNormalizePeriodKey_(values[index][1]) === periodKey) {
+      sheet.getRange(index + 1, 3, 1, 2).setValues([[independence, new Date()]]);
+      kpiAudit_(viewer.ldap, targetLdap, 'Самостійність', periodKey, independence);
+      return kpiJson_({ ok: true, data: { ldap: targetLdap, periodKey: periodKey, independence: independence } });
     }
   }
-  sheet.appendRow([targetLdap, independence, new Date()]);
-  return kpiJson_({ ok: true, data: { ldap: targetLdap, independence: independence } });
+  sheet.appendRow([targetLdap, periodKey, independence, new Date()]);
+  kpiAudit_(viewer.ldap, targetLdap, 'Самостійність', periodKey, independence);
+  return kpiJson_({ ok: true, data: { ldap: targetLdap, periodKey: periodKey, independence: independence } });
+}
+
+function kpiGetPeriodIndependenceMap_(ss) {
+  const sheet = ss.getSheetByName(KPI_PERIOD_INDEPENDENCE_SHEET_NAME);
+  const result = {};
+  if (!sheet) return result;
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const ldap = kpiNormalizeLdap_(values[index][0]);
+    const periodKey = kpiNormalizePeriodKey_(values[index][1]);
+    if (ldap && periodKey) result[kpiPeriodLdapKey_(ldap, periodKey)] = String(values[index][2] || '').trim();
+  }
+  return result;
+}
+
+function kpiGetIndependenceForPeriod_(periodMap, legacyMap, ldap, periodKey) {
+  const exact = periodMap[kpiPeriodLdapKey_(ldap, periodKey)];
+  return exact !== undefined ? exact : (legacyMap[ldap] || '');
+}
+
+function kpiPeriodLdapKey_(ldap, periodKey) {
+  return kpiNormalizeLdap_(ldap) + '|' + kpiNormalizePeriodKey_(periodKey);
+}
+
+function kpiNormalizePeriodKey_(value) {
+  const match = String(value || '').trim().match(/^(20\d{2})-(0[1-9]|1[0-2])$/);
+  return match ? match[0] : '';
+}
+
+function kpiBuildPeriodContent_(ss, kpiRows) {
+  const nameToLdap = {};
+  (kpiRows || []).forEach(row => {
+    const ldap = kpiNormalizeLdap_(row.ldap);
+    const name = kpiNormalizeName_(row.operator);
+    if (ldap && name) nameToLdap[name] = ldap;
+  });
+  return {
+    errors: kpiBuildMonthlyErrors_(ss, nameToLdap),
+    recommendations: kpiBuildMonthlyRecommendations_(ss),
+    diagnostics: { source: 'period-aware', errorsWithoutLdap: 0, errorsWithoutPeriod: 0 }
+  };
+}
+
+function kpiBuildMonthlyRecommendations_(ss) {
+  const result = { global: {}, byPeriod: {} };
+  const sheet = ss.getSheetByName(RECOMMENDATIONS_SHEET_NAME);
+  if (!sheet) return result;
+  const values = sheet.getDataRange().getDisplayValues();
+  if (!values.length) return result;
+
+  let start = 0;
+  let ldapIndex = 0;
+  let textIndex = 1;
+  let periodIndex = 2;
+  const firstMap = buildHeaderMap_(values[0]);
+  const ldapHeader = kpiFindHeader_(firstMap, ['LDAP', 'лдап']);
+  const textHeader = kpiFindHeader_(firstMap, ['Рекомендація', 'Рекомендації', 'Порада', 'Текст']);
+  if (ldapHeader !== '' && textHeader !== '') {
+    ldapIndex = Number(ldapHeader);
+    textIndex = Number(textHeader);
+    const foundPeriod = kpiFindHeader_(firstMap, ['Період', 'Місяць']);
+    periodIndex = foundPeriod === '' ? -1 : Number(foundPeriod);
+    start = 1;
+  }
+
+  for (let index = start; index < values.length; index += 1) {
+    const ldap = kpiNormalizeLdap_(values[index][ldapIndex]);
+    const text = String(values[index][textIndex] || '').trim();
+    const rawPeriod = periodIndex >= 0 ? values[index][periodIndex] : '';
+    const periodKey = kpiParsePeriodKey_(rawPeriod);
+    if (!ldap || !text) continue;
+    const recommendation = { title: periodKey ? 'Рекомендація за період' : 'Загальна рекомендація', text: text };
+    if (String(rawPeriod || '').trim() && !periodKey) continue;
+    if (!periodKey) {
+      if (!result.global[ldap]) result.global[ldap] = [];
+      result.global[ldap].push(recommendation);
+    } else {
+      const key = kpiPeriodLdapKey_(ldap, periodKey);
+      if (!result.byPeriod[key]) result.byPeriod[key] = [];
+      result.byPeriod[key].push(recommendation);
+    }
+  }
+  return result;
+}
+
+function kpiBuildMonthlyErrors_(ss, nameToLdap) {
+  const result = {};
+  kpiReadErrorSheet_(ss, CRITS_SHEET_NAME, 'crit', nameToLdap, result);
+  kpiReadErrorSheet_(ss, WARNINGS_SHEET_NAME, 'warning', nameToLdap, result);
+  return result;
+}
+
+function kpiReadErrorSheet_(ss, sheetName, type, nameToLdap, result) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return;
+  const values = sheet.getDataRange().getDisplayValues();
+  let headerMap = null;
+  let sectionPeriod = '';
+
+  values.forEach(row => {
+    const rowPeriod = kpiFindPeriodInCells_(row);
+    if (rowPeriod && !headerMap) sectionPeriod = rowPeriod;
+    const candidateMap = buildHeaderMap_(row);
+    const operatorIndex = kpiFindHeader_(candidateMap, ['Оператор']);
+    const errorIndex = kpiFindHeader_(candidateMap, ['Суть помилки', 'Помилка', 'Опис помилки']);
+    if (operatorIndex !== '' && errorIndex !== '') {
+      headerMap = candidateMap;
+      if (rowPeriod) sectionPeriod = rowPeriod;
+      return;
+    }
+    if (!headerMap) return;
+
+    const errorText = kpiGetByIndex_(row, Number(kpiFindHeader_(headerMap, ['Суть помилки', 'Помилка', 'Опис помилки'])));
+    if (!errorText) {
+      if (rowPeriod) sectionPeriod = rowPeriod;
+      return;
+    }
+    const ldapColumn = kpiFindHeader_(headerMap, ['LDAP', 'лдап']);
+    const ldap = ldapColumn !== ''
+      ? kpiNormalizeLdap_(kpiGetByIndex_(row, Number(ldapColumn)))
+      : (nameToLdap[kpiNormalizeName_(kpiGetByIndex_(row, Number(kpiFindHeader_(headerMap, ['Оператор']))))] || '');
+    if (!ldap) return;
+
+    const dateIndex = kpiFindHeader_(headerMap, ['Дата Кріта', 'Дата кріта', 'Дата зауваження', 'Дата']);
+    const periodIndex = kpiFindHeader_(headerMap, ['Період', 'Місяць', 'Unnamed: 0']);
+    const directPeriod = (dateIndex !== '' && kpiParsePeriodKey_(kpiGetByIndex_(row, Number(dateIndex)))) ||
+      (periodIndex !== '' && kpiParsePeriodKey_(kpiGetByIndex_(row, Number(periodIndex)))) || '';
+    const periodKey = directPeriod || sectionPeriod;
+    if (!periodKey) return;
+
+    const key = kpiPeriodLdapKey_(ldap, periodKey);
+    if (!result[key]) result[key] = kpiEmptyErrors_();
+    const bucket = result[key];
+    if (type === 'crit') bucket.crits += 1; else bucket.warnings += 1;
+    bucket.total += 1;
+    const category = categorizeError_(errorText);
+    bucket.themes[category] = (bucket.themes[category] || 0) + 1;
+    if (bucket.examples.length < 5) bucket.examples.push({
+      type: type === 'crit' ? 'Крит' : 'Зауваження',
+      category: category,
+      date: dateIndex !== '' ? kpiGetByIndex_(row, Number(dateIndex)) : periodKey,
+      text: shorten_(errorText, 320)
+    });
+  });
+}
+
+function kpiEmptyErrors_() {
+  return { crits: 0, warnings: 0, total: 0, themes: {}, examples: [] };
+}
+
+function kpiFindHeader_(headerMap, names) {
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index];
+    if (headerMap.hasOwnProperty(name)) {
+      const columns = Array.isArray(headerMap[name]) ? headerMap[name] : [headerMap[name]];
+      return String(columns[0]);
+    }
+  }
+  return '';
+}
+
+function kpiGetByIndex_(row, index) {
+  return String(index >= 0 && row[index] !== undefined ? row[index] : '').trim();
+}
+
+function kpiNormalizeName_(value) {
+  return String(value || '').toLowerCase().replace(/ё/g, 'е').replace(/ґ/g, 'г').replace(/\s+/g, ' ').trim();
+}
+
+function kpiFindPeriodInCells_(row) {
+  for (let index = 0; index < row.length; index += 1) {
+    const periodKey = kpiParsePeriodKey_(row[index]);
+    if (periodKey) return periodKey;
+  }
+  return '';
+}
+
+function kpiParsePeriodKey_(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  let match = text.match(/^(20\d{2})\s*[-/.]\s*(0?[1-9]|1[0-2])(?:\s*[-/.]\s*\d{1,2})?$/);
+  if (match) return match[1] + '-' + String(Number(match[2])).padStart(2, '0');
+  match = text.match(/^\d{1,2}\s*[-/.]\s*(0?[1-9]|1[0-2])\s*[-/.]\s*(20\d{2})$/);
+  if (match) return match[2] + '-' + String(Number(match[1])).padStart(2, '0');
+  match = text.match(/^(0?[1-9]|1[0-2])\s*\/\s*(20\d{2})$/);
+  if (match) return match[2] + '-' + String(Number(match[1])).padStart(2, '0');
+  const year = (text.match(/20\d{2}/) || [])[0];
+  if (!year) return '';
+  for (let index = 0; index < MONTHS_UA.length; index += 1) {
+    if (MONTHS_UA[index].keys.some(key => text.indexOf(key) !== -1)) return year + '-' + MONTHS_UA[index].number;
+  }
+  return '';
 }
 
 function kpiGetUsefulLinks_(viewerLdap, includeAll) {
@@ -444,7 +678,96 @@ function kpiAddUsefulLink_(request) {
     sheet.appendRow(['Назва', 'Посилання', 'Для LDAP', 'Активне', 'Оновлено']);
   }
   sheet.appendRow([title, url, audience, 'так', new Date()]);
+  kpiAudit_(viewer.ldap, audience, 'Корисне посилання', '', title);
   return kpiJson_({ ok: true, data: { title: title, url: url, audience: audience, active: true } });
+}
+
+function kpiGetDevelopmentPlans_(ss, allowedLdaps) {
+  const sheet = ss.getSheetByName(KPI_DEVELOPMENT_PLANS_SHEET_NAME);
+  if (!sheet) return [];
+  const allowed = {};
+  (allowedLdaps || []).forEach(ldap => { allowed[kpiNormalizeLdap_(ldap)] = true; });
+  const result = [];
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const ldap = kpiNormalizeLdap_(values[index][0]);
+    const periodKey = kpiNormalizePeriodKey_(values[index][1]);
+    const task = String(values[index][2] || '').trim();
+    const status = String(values[index][3] || '').trim() || 'Заплановано';
+    if (allowed[ldap] && periodKey && task) result.push({ ldap: ldap, periodKey: periodKey, task: task, status: status });
+  }
+  return result.sort((a, b) => b.periodKey.localeCompare(a.periodKey));
+}
+
+function kpiAddDevelopmentPlan_(request) {
+  const viewer = kpiGetAccessProfile_(request.viewerLdap);
+  if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
+  const targetLdap = kpiNormalizeLdap_(request.targetLdap);
+  const periodKey = kpiNormalizePeriodKey_(request.periodKey);
+  const task = String(request.task || '').trim().slice(0, 500);
+  const status = String(request.status || '').trim().slice(0, 80) || 'Заплановано';
+  const profiles = kpiGetAccessProfiles_();
+  if (!targetLdap || !profiles[targetLdap] || !periodKey || !task) return kpiJson_({ ok: false, error: 'Вкажіть LDAP, місяць і крок донавчання' });
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_DEVELOPMENT_PLANS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_DEVELOPMENT_PLANS_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Період', 'Крок донавчання', 'Статус', 'Оновлено']);
+  }
+  sheet.appendRow([targetLdap, periodKey, task, status, new Date()]);
+  kpiAudit_(viewer.ldap, targetLdap, 'План донавчання', periodKey, task);
+  return kpiJson_({ ok: true, data: { ldap: targetLdap, periodKey: periodKey, task: task, status: status } });
+}
+
+function kpiGetKpiTargets_(ss, direction) {
+  const sheet = ss.getSheetByName(KPI_TARGETS_SHEET_NAME);
+  if (!sheet) return [];
+  const requiredDirection = String(direction || '').trim();
+  const result = [];
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const itemDirection = String(values[index][0] || '').trim();
+    const metric = String(values[index][1] || '').trim();
+    const target = String(values[index][2] || '').trim();
+    if (metric && target && (!requiredDirection || itemDirection === requiredDirection || itemDirection === 'ALL')) result.push({ direction: itemDirection || 'ALL', metric: metric, target: target });
+  }
+  return result;
+}
+
+function kpiSetKpiTarget_(request) {
+  const viewer = kpiGetAccessProfile_(request.viewerLdap);
+  if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
+  const direction = String(request.direction || '').trim().slice(0, 100) || 'ALL';
+  const metric = String(request.metric || '').trim().slice(0, 80);
+  const target = String(request.target || '').trim().slice(0, 80);
+  if (!metric || !target) return kpiJson_({ ok: false, error: 'Вкажіть показник і ціль' });
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_TARGETS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_TARGETS_SHEET_NAME);
+    sheet.appendRow(['Напрямок', 'Показник', 'Ціль', 'Оновлено']);
+  }
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    if (String(values[index][0] || '').trim() === direction && String(values[index][1] || '').trim().toLowerCase() === metric.toLowerCase()) {
+      sheet.getRange(index + 1, 3, 1, 2).setValues([[target, new Date()]]);
+      kpiAudit_(viewer.ldap, direction, 'Ціль KPI', '', metric + ': ' + target);
+      return kpiJson_({ ok: true, data: { direction: direction, metric: metric, target: target } });
+    }
+  }
+  sheet.appendRow([direction, metric, target, new Date()]);
+  kpiAudit_(viewer.ldap, direction, 'Ціль KPI', '', metric + ': ' + target);
+  return kpiJson_({ ok: true, data: { direction: direction, metric: metric, target: target } });
+}
+
+function kpiAudit_(actorLdap, target, action, periodKey, details) {
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_AUDIT_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_AUDIT_SHEET_NAME);
+    sheet.appendRow(['Дата/час', 'Хто змінив', 'Кого/що', 'Дія', 'Період', 'Деталі']);
+  }
+  sheet.appendRow([new Date(), actorLdap, target, action, periodKey, details]);
 }
 
 function kpiIssueLoginToken_(ldap) {
