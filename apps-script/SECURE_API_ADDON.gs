@@ -8,6 +8,7 @@ const KPI_API_SECRET_PROPERTY = 'KPI_API_SECRET';
 const KPI_LOGIN_TOKENS_SHEET_NAME = 'KPI login tokens';
 const KPI_SLACK_CACHE_SHEET_NAME = 'KPI Slack cache';
 const KPI_SLACK_BOT_TOKEN_PROPERTY = 'SLACK_BOT_TOKEN';
+const KPI_ADMIN_LDAPS_PROPERTY = 'KPI_ADMIN_LDAPS';
 
 function doPost(e) {
   try {
@@ -201,8 +202,18 @@ function kpiGetPrivateDashboard_(request) {
   const periodsMap = {};
   rows.forEach(row => { periodsMap[row.periodKey] = { key: row.periodKey, label: row.periodLabel, year: row.year, month: row.month }; });
   const periods = Object.keys(periodsMap).map(key => periodsMap[key]).sort((a, b) => b.key.localeCompare(a.key));
+  const accessProfiles = viewer.role === 'admin'
+    ? Object.keys(profiles).filter(profileLdap => allowedLdaps[profileLdap]).map(profileLdap => ({
+      ldap: profiles[profileLdap].ldap,
+      operator: profiles[profileLdap].operator,
+      direction: profiles[profileLdap].direction,
+      team: profiles[profileLdap].team,
+      role: profiles[profileLdap].role,
+      hasKpi: rows.some(row => row.ldap.toUpperCase() === profileLdap)
+    })).sort((a, b) => String(a.operator || '').localeCompare(String(b.operator || ''), 'uk'))
+    : [];
 
-  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '' } });
+  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '', accessProfiles: accessProfiles } });
 }
 
 function kpiGetAccessProfiles_() {
@@ -225,7 +236,13 @@ function kpiGetAccessProfiles_() {
     const ldap = kpiGetLdapByHeader_(row, headerMap);
     if (!ldap) continue;
     const roleValue = cleanValue_(getByHeader_(row, headerMap, ['Роль', 'Role'])).toLowerCase();
-    const role = roleValue === 'lead' || roleValue === 'керівник' ? 'lead' : roleValue === 'manager' || roleValue === 'менеджер' ? 'manager' : 'operator';
+    const role = kpiIsAdminLdap_(ldap) || roleValue === 'admin' || roleValue === 'адміністратор'
+      ? 'admin'
+      : roleValue === 'lead' || roleValue === 'керівник'
+        ? 'lead'
+        : roleValue === 'manager' || roleValue === 'менеджер'
+          ? 'manager'
+          : 'operator';
     result[ldap] = {
       ldap: ldap,
       operator: cleanValue_(getByHeader_(row, headerMap, ['Оператор'])),
@@ -258,10 +275,22 @@ function kpiGetAccessProfile_(ldap) {
   return kpiGetAccessProfiles_()[kpiNormalizeLdap_(ldap)] || null;
 }
 
+function kpiGetAdminLdaps_() {
+  return String(PropertiesService.getScriptProperties().getProperty(KPI_ADMIN_LDAPS_PROPERTY) || '')
+    .split(/[;,\s]+/)
+    .map(kpiNormalizeLdap_)
+    .filter(Boolean);
+}
+
+function kpiIsAdminLdap_(ldap) {
+  return kpiGetAdminLdaps_().indexOf(kpiNormalizeLdap_(ldap)) !== -1;
+}
+
 function kpiAllowedLdaps_(viewer, profiles) {
   const allowed = {};
   Object.keys(profiles).forEach(ldap => {
     const profile = profiles[ldap];
+    if (viewer.role === 'admin') allowed[ldap] = true;
     if (viewer.role === 'lead' && viewer.direction && profile.direction === viewer.direction) allowed[ldap] = true;
     if (viewer.role === 'manager' && profile.managerLdap === viewer.ldap) allowed[ldap] = true;
     if (ldap === viewer.ldap) allowed[ldap] = true;
