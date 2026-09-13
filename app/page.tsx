@@ -69,6 +69,7 @@ export default function Home() {
   const [loginMessage, setLoginMessage] = useState('');
   const [loginPending, setLoginPending] = useState(false);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: { registerTool?: (tool: unknown, options?: { signal: AbortSignal }) => void | Promise<void> } }).modelContext;
@@ -96,7 +97,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    void fetch('/api/dashboard').then(async (response) => response.ok ? response.json() as Promise<Dashboard> : null).then(setDashboard).catch(() => undefined);
+    void fetch('/api/dashboard')
+      .then(async (response) => response.ok ? response.json() as Promise<Dashboard> : null)
+      .then(setDashboard)
+      .catch(() => undefined)
+      .finally(() => setDashboardLoading(false));
   }, []);
 
   const ownRows = dashboard?.rows.filter((row) => row.ldap === dashboard.viewer.ldap) || [];
@@ -121,6 +126,18 @@ export default function Home() {
     } finally {
       setLoginPending(false);
     }
+  }
+
+  if (!dashboard && dashboardLoading) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f4f7fb] px-4 text-slate-900">
+        <div className="text-center">
+          <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-200"><LockKeyhole className="size-6" /></div>
+          <p className="mt-5 text-lg font-extrabold">Відкриваємо кабінет…</p>
+          <p className="mt-1 text-sm text-slate-500">Перевіряємо безпечну сесію.</p>
+        </div>
+      </main>
+    );
   }
 
   if (!dashboard) {
