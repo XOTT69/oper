@@ -9,6 +9,9 @@ const KPI_LOGIN_TOKENS_SHEET_NAME = 'KPI login tokens';
 const KPI_SLACK_CACHE_SHEET_NAME = 'KPI Slack cache';
 const KPI_SLACK_BOT_TOKEN_PROPERTY = 'SLACK_BOT_TOKEN';
 const KPI_ADMIN_LDAPS_PROPERTY = 'KPI_ADMIN_LDAPS';
+const KPI_ACCESS_SHEET_NAME = 'KPI access';
+const KPI_OPERATOR_SETTINGS_SHEET_NAME = 'KPI cabinet profiles';
+const KPI_USEFUL_LINKS_SHEET_NAME = 'KPI useful links';
 
 function doPost(e) {
   try {
@@ -20,6 +23,9 @@ function doPost(e) {
       case 'request_login': return kpiRequestLogin_(request);
       case 'consume_login': return kpiConsumeLogin_(request);
       case 'get_dashboard': return kpiGetPrivateDashboard_(request);
+      case 'set_access': return kpiSetAccess_(request);
+      case 'set_independence': return kpiSetIndependence_(request);
+      case 'add_useful_link': return kpiAddUsefulLink_(request);
       default: return kpiJson_({ ok: false, error: 'unknown action' });
     }
   } catch (error) {
@@ -202,18 +208,24 @@ function kpiGetPrivateDashboard_(request) {
   const periodsMap = {};
   rows.forEach(row => { periodsMap[row.periodKey] = { key: row.periodKey, label: row.periodLabel, year: row.year, month: row.month }; });
   const periods = Object.keys(periodsMap).map(key => periodsMap[key]).sort((a, b) => b.key.localeCompare(a.key));
+  const helpfulLinks = kpiGetUsefulLinks_(viewer.ldap, false);
   const accessProfiles = viewer.role === 'admin'
-    ? Object.keys(profiles).filter(profileLdap => allowedLdaps[profileLdap]).map(profileLdap => ({
+    ? Object.keys(profiles).map(profileLdap => ({
       ldap: profiles[profileLdap].ldap,
       operator: profiles[profileLdap].operator,
       direction: profiles[profileLdap].direction,
       team: profiles[profileLdap].team,
+      level: profiles[profileLdap].level,
+      status: profiles[profileLdap].status,
       role: profiles[profileLdap].role,
-      hasKpi: rows.some(row => row.ldap.toUpperCase() === profileLdap)
+      independence: profiles[profileLdap].independence,
+      accessEnabled: profiles[profileLdap].accessEnabled,
+      hasKpi: (dashboard.rows || []).some(row => row.ldap.toUpperCase() === profileLdap)
     })).sort((a, b) => String(a.operator || '').localeCompare(String(b.operator || ''), 'uk'))
     : [];
 
-  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '', accessProfiles: accessProfiles } });
+  const adminLinks = viewer.role === 'admin' ? kpiGetUsefulLinks_(viewer.ldap, true) : [];
+  return kpiJson_({ ok: true, data: { viewer: viewer, rows: rows, periods: periods, latestPeriodKey: periods.length ? periods[0].key : '', helpfulLinks: helpfulLinks, accessProfiles: accessProfiles, adminLinks: adminLinks } });
 }
 
 function kpiGetAccessProfiles_() {
@@ -248,11 +260,20 @@ function kpiGetAccessProfiles_() {
       operator: cleanValue_(getByHeader_(row, headerMap, ['Оператор'])),
       direction: cleanValue_(getByHeader_(row, headerMap, ['Напрямок'])),
       team: cleanValue_(getByHeader_(row, headerMap, ['Команда', 'Team'])),
+      level: cleanValue_(getByHeader_(row, headerMap, ['Левел', 'Рівень', 'Level'])),
+      status: cleanValue_(getByHeader_(row, headerMap, ['Статус'])),
       managerLdap: kpiNormalizeLdap_(getByHeader_(row, headerMap, ['Керівник LDAP', 'Manager LDAP'])),
       slackUserId: cleanValue_(getByHeader_(row, headerMap, ['Slack User ID', 'Slack ID'])),
       role: role
     };
   }
+
+  const accessMap = kpiGetAccessMap_(ss, Object.keys(result));
+  const settingsMap = kpiGetOperatorSettingsMap_(ss);
+  Object.keys(result).forEach(ldap => {
+    result[ldap].accessEnabled = accessMap[ldap] === true;
+    result[ldap].independence = settingsMap[ldap] || '';
+  });
   return result;
 }
 
@@ -272,7 +293,8 @@ function kpiGetLdapByHeader_(row, headerMap) {
 }
 
 function kpiGetAccessProfile_(ldap) {
-  return kpiGetAccessProfiles_()[kpiNormalizeLdap_(ldap)] || null;
+  const profile = kpiGetAccessProfiles_()[kpiNormalizeLdap_(ldap)] || null;
+  return profile && profile.accessEnabled ? profile : null;
 }
 
 function kpiGetAdminLdaps_() {
@@ -290,12 +312,139 @@ function kpiAllowedLdaps_(viewer, profiles) {
   const allowed = {};
   Object.keys(profiles).forEach(ldap => {
     const profile = profiles[ldap];
+    if (!profile.accessEnabled) return;
     if (viewer.role === 'admin') allowed[ldap] = true;
     if (viewer.role === 'lead' && viewer.direction && profile.direction === viewer.direction) allowed[ldap] = true;
     if (viewer.role === 'manager' && profile.managerLdap === viewer.ldap) allowed[ldap] = true;
     if (ldap === viewer.ldap) allowed[ldap] = true;
   });
   return allowed;
+}
+
+function kpiGetAccessMap_(ss, knownLdaps) {
+  let sheet = ss.getSheetByName(KPI_ACCESS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_ACCESS_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Доступ', 'Оновлено']);
+    (knownLdaps || []).forEach(ldap => sheet.appendRow([ldap, 'так', new Date()]));
+  }
+
+  const map = {};
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const ldap = kpiNormalizeLdap_(values[index][0]);
+    if (ldap) map[ldap] = kpiIsAccessEnabled_(values[index][1]);
+  }
+  return map;
+}
+
+function kpiIsAccessEnabled_(value) {
+  return ['так', 'yes', 'true', '1', 'увімкнено', 'enabled'].indexOf(String(value || '').trim().toLowerCase()) !== -1;
+}
+
+function kpiSetAccess_(request) {
+  const viewer = kpiGetAccessProfile_(request.viewerLdap);
+  if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
+
+  const targetLdap = kpiNormalizeLdap_(request.targetLdap);
+  const enabled = request.enabled === true;
+  const profiles = kpiGetAccessProfiles_();
+  if (!targetLdap || !profiles[targetLdap]) return kpiJson_({ ok: false, error: 'LDAP не знайдено серед операторів' });
+  if (targetLdap === viewer.ldap && !enabled) return kpiJson_({ ok: false, error: 'Не можна вимкнути власний доступ адміністратора' });
+
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  const sheet = kpiGetAccessSheet_(ss);
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    if (kpiNormalizeLdap_(values[index][0]) === targetLdap) {
+      sheet.getRange(index + 1, 2, 1, 2).setValues([[enabled ? 'так' : 'ні', new Date()]]);
+      return kpiJson_({ ok: true, data: { ldap: targetLdap, accessEnabled: enabled } });
+    }
+  }
+  sheet.appendRow([targetLdap, enabled ? 'так' : 'ні', new Date()]);
+  return kpiJson_({ ok: true, data: { ldap: targetLdap, accessEnabled: enabled } });
+}
+
+function kpiGetAccessSheet_(ss) {
+  let sheet = ss.getSheetByName(KPI_ACCESS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_ACCESS_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Доступ', 'Оновлено']);
+  }
+  return sheet;
+}
+
+function kpiGetOperatorSettingsMap_(ss) {
+  const sheet = ss.getSheetByName(KPI_OPERATOR_SETTINGS_SHEET_NAME);
+  const result = {};
+  if (!sheet) return result;
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const ldap = kpiNormalizeLdap_(values[index][0]);
+    if (ldap) result[ldap] = String(values[index][1] || '').trim();
+  }
+  return result;
+}
+
+function kpiSetIndependence_(request) {
+  const viewer = kpiGetAccessProfile_(request.viewerLdap);
+  if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
+  const targetLdap = kpiNormalizeLdap_(request.targetLdap);
+  const independence = String(request.independence || '').trim().slice(0, 120);
+  const profiles = kpiGetAccessProfiles_();
+  if (!targetLdap || !profiles[targetLdap]) return kpiJson_({ ok: false, error: 'LDAP не знайдено серед операторів' });
+
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_OPERATOR_SETTINGS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_OPERATOR_SETTINGS_SHEET_NAME);
+    sheet.appendRow(['LDAP', 'Рівень самостійності', 'Оновлено']);
+  }
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    if (kpiNormalizeLdap_(values[index][0]) === targetLdap) {
+      sheet.getRange(index + 1, 2, 1, 2).setValues([[independence, new Date()]]);
+      return kpiJson_({ ok: true, data: { ldap: targetLdap, independence: independence } });
+    }
+  }
+  sheet.appendRow([targetLdap, independence, new Date()]);
+  return kpiJson_({ ok: true, data: { ldap: targetLdap, independence: independence } });
+}
+
+function kpiGetUsefulLinks_(viewerLdap, includeAll) {
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(KPI_USEFUL_LINKS_SHEET_NAME);
+  if (!sheet) return [];
+  const result = [];
+  const values = sheet.getDataRange().getDisplayValues();
+  for (let index = 1; index < values.length; index += 1) {
+    const title = String(values[index][0] || '').trim();
+    const url = String(values[index][1] || '').trim();
+    const audience = kpiNormalizeLdap_(values[index][2]) || (String(values[index][2] || '').trim().toUpperCase() === 'ALL' ? 'ALL' : '');
+    const active = kpiIsAccessEnabled_(values[index][3]);
+    if (!title || !/^https:\/\//i.test(url) || !audience || (!includeAll && (!active || (audience !== 'ALL' && audience !== viewerLdap)))) continue;
+    result.push({ title: title, url: url, audience: audience, active: active });
+  }
+  return result;
+}
+
+function kpiAddUsefulLink_(request) {
+  const viewer = kpiGetAccessProfile_(request.viewerLdap);
+  if (!viewer || viewer.role !== 'admin') return kpiJson_({ ok: false, error: 'forbidden' });
+  const title = String(request.title || '').trim().slice(0, 120);
+  const url = String(request.url || '').trim();
+  const audience = kpiNormalizeLdap_(request.audience) || (String(request.audience || '').trim().toUpperCase() === 'ALL' ? 'ALL' : '');
+  const profiles = kpiGetAccessProfiles_();
+  if (!title || !/^https:\/\//i.test(url) || !audience || (audience !== 'ALL' && !profiles[audience])) return kpiJson_({ ok: false, error: 'Перевірте назву, HTTPS-посилання та LDAP отримувача' });
+
+  const ss = SpreadsheetApp.openById(KPI_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(KPI_USEFUL_LINKS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(KPI_USEFUL_LINKS_SHEET_NAME);
+    sheet.appendRow(['Назва', 'Посилання', 'Для LDAP', 'Активне', 'Оновлено']);
+  }
+  sheet.appendRow([title, url, audience, 'так', new Date()]);
+  return kpiJson_({ ok: true, data: { title: title, url: url, audience: audience, active: true } });
 }
 
 function kpiIssueLoginToken_(ldap) {

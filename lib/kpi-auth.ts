@@ -1,4 +1,4 @@
-export type KpiRole = 'operator' | 'manager' | 'lead';
+export type KpiRole = 'operator' | 'manager' | 'lead' | 'admin';
 
 export type KpiSession = {
   ldap: string;
@@ -56,7 +56,7 @@ export async function readSession(request: Request): Promise<KpiSession | null> 
 
   try {
     const payload = JSON.parse(decoder.decode(fromBase64Url(encoded))) as KpiSession;
-    if (!/^[a-z0-9._-]{3,64}$/i.test(payload.ldap) || !['operator', 'manager', 'lead'].includes(payload.role) || payload.expiresAt <= Date.now()) return null;
+    if (!/^[a-z0-9._-]{3,64}$/i.test(payload.ldap) || !['operator', 'manager', 'lead', 'admin'].includes(payload.role) || payload.expiresAt <= Date.now()) return null;
     return payload;
   } catch {
     return null;

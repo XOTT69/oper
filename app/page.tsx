@@ -3,7 +3,6 @@
 import {
   BookOpen,
   CalendarDays,
-  ExternalLink,
   GraduationCap,
   House,
   LayoutDashboard,
@@ -18,6 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { HelpfulLinks, OperatorPreview, type HelpfulLink } from '@/components/operator-preview';
 
 type Recommendation = { title: string; text: string };
 type ErrorTheme = { name: string; count: number };
@@ -27,6 +27,10 @@ type DashboardRow = {
   periodLabel: string;
   scoreNumber: number | null;
   quality: string;
+  at?: string;
+  sl?: string;
+  slAsa?: string;
+  knowledge?: string;
   kkdPercent: string;
   requests: string;
   periodKey: string;
@@ -35,13 +39,17 @@ type DashboardRow = {
   errorThemes?: ErrorTheme[];
   critsCount?: number;
   warningsCount?: number;
+  errorsTotal?: number;
+  errorExamples?: { type: string; category: string; date: string; text: string }[];
 };
-type AccessProfile = { ldap: string; operator: string; direction?: string; team?: string; role?: string; hasKpi?: boolean };
+type AccessProfile = { ldap: string; operator: string; direction?: string; team?: string; role?: string; level?: string; status?: string; independence?: string; hasKpi?: boolean; accessEnabled?: boolean };
 type Dashboard = {
   viewer: { ldap: string; operator: string; role: string; direction?: string; team?: string };
   rows: DashboardRow[];
   latestPeriodKey?: string;
   accessProfiles?: AccessProfile[];
+  helpfulLinks?: HelpfulLink[];
+  adminLinks?: HelpfulLink[];
 };
 
 function NavItem({ icon: Icon, label, active = false, onClick }: { icon: typeof House; label: string; active?: boolean; onClick: () => void }) {
@@ -64,6 +72,15 @@ export default function Home() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
+  const [accessPending, setAccessPending] = useState<string | null>(null);
+  const [accessMessage, setAccessMessage] = useState('');
+  const [previewLdap, setPreviewLdap] = useState('');
+  const [independenceDrafts, setIndependenceDrafts] = useState<Record<string, string>>({});
+  const [independencePending, setIndependencePending] = useState<string | null>(null);
+  const [linkTitle, setLinkTitle] = useState('');
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkAudience, setLinkAudience] = useState('ALL');
+  const [linkPending, setLinkPending] = useState(false);
 
   useEffect(() => {
     void fetch('/api/dashboard')
@@ -75,13 +92,6 @@ export default function Home() {
 
   const ownRows = dashboard?.rows.filter((row) => row.ldap === dashboard.viewer.ldap) || [];
   const latest = ownRows[0];
-  const visibleMetrics = [
-    { label: 'Загальний бал', value: latest?.scoreNumber?.toString() || '—', note: 'за поточний період', tone: 'text-emerald-700' },
-    { label: 'Якість', value: latest?.quality || '—', note: 'за поточний період', tone: 'text-emerald-700' },
-    { label: 'ККД', value: latest?.kkdPercent || '—', note: 'за поточний період', tone: 'text-emerald-700' },
-    { label: 'Звернення', value: latest?.requests || '—', note: 'за поточний період', tone: 'text-slate-500' },
-  ];
-  const visibleMonthlyData = ownRows.slice(0, 6).reverse().map((row) => ({ score: row.scoreNumber || 0, label: row.periodLabel.slice(0, 3) }));
   const isAdmin = dashboard?.viewer.role === 'admin';
 
   async function requestLogin() {
@@ -96,6 +106,53 @@ export default function Home() {
     } finally {
       setLoginPending(false);
     }
+  }
+
+  async function setOperatorAccess(profile: AccessProfile, enabled: boolean) {
+    setAccessPending(profile.ldap);
+    setAccessMessage('');
+    try {
+      const response = await fetch('/api/admin/access', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ldap: profile.ldap, enabled }),
+      });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Не вдалося оновити доступ.');
+      setDashboard((current) => current ? {
+        ...current,
+        accessProfiles: current.accessProfiles?.map((item) => item.ldap === profile.ldap ? { ...item, accessEnabled: enabled } : item),
+      } : current);
+      setAccessMessage(enabled ? `Доступ для ${profile.ldap} надано.` : `Доступ для ${profile.ldap} вимкнено.`);
+    } catch (error) {
+      setAccessMessage(error instanceof Error ? error.message : 'Не вдалося оновити доступ.');
+    } finally {
+      setAccessPending(null);
+    }
+  }
+
+  async function saveIndependence(profile: AccessProfile) {
+    const independence = independenceDrafts[profile.ldap] ?? profile.independence ?? '';
+    setIndependencePending(profile.ldap); setAccessMessage('');
+    try {
+      const response = await fetch('/api/admin/independence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ldap: profile.ldap, independence }) });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Не вдалося зберегти рівень самостійності.');
+      setDashboard((current) => current ? { ...current, accessProfiles: current.accessProfiles?.map((item) => item.ldap === profile.ldap ? { ...item, independence } : item) } : current);
+      setAccessMessage(`Рівень самостійності для ${profile.ldap} збережено.`);
+    } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося зберегти зміни.'); } finally { setIndependencePending(null); }
+  }
+
+  async function addHelpfulLink() {
+    setLinkPending(true); setAccessMessage('');
+    try {
+      const response = await fetch('/api/admin/links', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: linkTitle, url: linkUrl, audience: linkAudience || 'ALL' }) });
+      const body = await response.json() as HelpfulLink & { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Не вдалося додати посилання.');
+      const link: HelpfulLink = { title: body.title, url: body.url, audience: body.audience, active: body.active };
+      setDashboard((current) => current ? { ...current, adminLinks: [...(current.adminLinks || []), link], helpfulLinks: link.audience === 'ALL' || link.audience === current.viewer.ldap ? [...(current.helpfulLinks || []), link] : current.helpfulLinks } : current);
+      setLinkTitle(''); setLinkUrl(''); setLinkAudience('ALL'); setAccessMessage('Корисне посилання додано.');
+    } catch (error) { setAccessMessage(error instanceof Error ? error.message : 'Не вдалося додати посилання.'); } finally { setLinkPending(false); }
   }
 
   if (!dashboard && dashboardLoading) {
@@ -133,6 +190,10 @@ export default function Home() {
   }
 
   const adminProfiles = dashboard.accessProfiles || [];
+  const enabledProfiles = adminProfiles.filter((profile) => profile.accessEnabled !== false);
+  const selectedProfile = adminProfiles.find((profile) => profile.ldap === previewLdap);
+  const selectedRows = selectedProfile ? dashboard.rows.filter((row) => row.ldap === selectedProfile.ldap) : [];
+  const selectedLinks = selectedProfile ? (dashboard.adminLinks || []).filter((link) => link.active !== false && (link.audience === 'ALL' || link.audience === selectedProfile.ldap)) : [];
   const latestRowByLdap = new Map<string, DashboardRow>();
   dashboard.rows.forEach((row) => {
     if (!latestRowByLdap.has(row.ldap)) latestRowByLdap.set(row.ldap, row);
@@ -186,16 +247,7 @@ export default function Home() {
             </TabsList>
 
             <TabsContent value="overview" className="mt-5">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                {visibleMetrics.map((metric) => (
-                  <article key={metric.label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><p className="text-sm font-medium text-slate-500">{metric.label}</p><div className="mt-3 flex items-end justify-between gap-3"><p className="text-3xl font-black tracking-[-0.05em]">{metric.value}</p><p className={`pb-1 text-xs font-bold ${metric.tone}`}>{metric.note}</p></div></article>
-                ))}
-              </div>
-
-              <article className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-                <div className="flex items-start justify-between gap-4"><div><p className="text-lg font-extrabold tracking-tight">Динаміка загального балу</p><p className="mt-1 text-sm text-slate-500">За доступні періоди KPI</p></div>{visibleMonthlyData.length > 0 && <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50">{visibleMonthlyData.length} періодів</Badge>}</div>
-                {visibleMonthlyData.length > 0 ? <div className="mt-8 flex h-44 items-end justify-between gap-3 border-b border-slate-100 pb-1">{visibleMonthlyData.map((item, index) => <div key={`${item.label}-${index}`} className="flex h-full flex-1 flex-col items-center justify-end gap-2"><span className="text-xs font-bold text-slate-600">{item.score || '—'}</span><div className={`w-full max-w-10 rounded-t-xl ${index === visibleMonthlyData.length - 1 ? 'bg-gradient-to-t from-blue-600 to-indigo-500' : 'bg-blue-100'}`} style={{ height: `${Math.min(100, Math.max(4, item.score))}%` }} /><span className="text-[11px] font-medium text-slate-400">{item.label}</span></div>)}</div> : <p className="mt-6 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Для вашого LDAP ще немає внесених KPI. Коли дані з’являться у таблиці, вони підтягнуться сюди автоматично.</p>}
-              </article>
+              <OperatorPreview profile={{ ldap: dashboard.viewer.ldap, operator: dashboard.viewer.operator, direction: dashboard.viewer.direction }} rows={ownRows} links={dashboard.helpfulLinks || []} />
             </TabsContent>
 
             <TabsContent value="recommendations" className="mt-5 grid gap-4 xl:grid-cols-2">
@@ -205,8 +257,11 @@ export default function Home() {
             </TabsContent>
 
             {isAdmin && <TabsContent value="admin" className="mt-5">
-              <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-xl font-extrabold">Доступ операторів</h2><p className="mt-1 text-sm leading-6 text-slate-500">Нижче — LDAP, яким надано доступ, і останні доступні KPI. Доступ перевіряється сервером, а не браузером.</p></div><Badge className="w-fit bg-slate-100 text-slate-700 hover:bg-slate-100">{adminProfiles.length} операторів</Badge></div>
-                {adminProfiles.length > 0 ? <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[680px] text-left text-sm"><thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-3 py-3 font-bold">Оператор</th><th className="px-3 py-3 font-bold">LDAP</th><th className="px-3 py-3 font-bold">Напрямок</th><th className="px-3 py-3 font-bold">Останній період</th><th className="px-3 py-3 font-bold">Бал</th></tr></thead><tbody>{adminProfiles.map((profile) => { const row = latestRowByLdap.get(profile.ldap); return <tr key={profile.ldap} className="border-b border-slate-100 last:border-0"><td className="px-3 py-3 font-semibold">{profile.operator || '—'}</td><td className="px-3 py-3 font-mono text-xs text-slate-600">{profile.ldap}</td><td className="px-3 py-3 text-slate-600">{profile.direction || '—'}</td><td className="px-3 py-3 text-slate-600">{row?.periodLabel || 'дані не внесено'}</td><td className="px-3 py-3 font-bold">{row?.scoreNumber ?? '—'}</td></tr>; })}</tbody></table></div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Список доступів ще не надійшов із захищеного сервісу KPI.</p>}</article>
+              <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-xl font-extrabold">Доступ операторів</h2><p className="mt-1 text-sm leading-6 text-slate-500">Тут можна надати або вимкнути доступ за LDAP. Стан перевіряється сервером — вимкнений оператор не отримає посилання в Slack і не відкриє KPI.</p></div><Badge className="w-fit bg-slate-100 text-slate-700 hover:bg-slate-100">{enabledProfiles.length} з {adminProfiles.length} активні</Badge></div>
+                {accessMessage && <p className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-700" role="status">{accessMessage}</p>}
+                {adminProfiles.length > 0 ? <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[1060px] text-left text-sm"><thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-3 py-3 font-bold">Оператор</th><th className="px-3 py-3 font-bold">LDAP</th><th className="px-3 py-3 font-bold">KPI</th><th className="px-3 py-3 font-bold">Самостійність</th><th className="px-3 py-3 font-bold">Доступ</th><th className="px-3 py-3 font-bold">Дії</th></tr></thead><tbody>{adminProfiles.map((profile) => { const row = latestRowByLdap.get(profile.ldap); const accessEnabled = profile.accessEnabled !== false; const ownAdmin = profile.ldap === dashboard.viewer.ldap; const draft = independenceDrafts[profile.ldap] ?? profile.independence ?? ''; return <tr key={profile.ldap} className="border-b border-slate-100 last:border-0"><td className="px-3 py-3 font-semibold">{profile.operator || '—'}<p className="mt-0.5 text-xs font-normal text-slate-500">{profile.direction || '—'}</p></td><td className="px-3 py-3 font-mono text-xs text-slate-600">{profile.ldap}</td><td className="px-3 py-3"><p className="font-bold">{row?.scoreNumber ?? '—'}</p><p className="text-xs text-slate-500">{row?.periodLabel || 'дані не внесено'}</p></td><td className="px-3 py-3"><div className="flex min-w-56 gap-2"><Input aria-label={`Рівень самостійності ${profile.ldap}`} value={draft} onChange={(event) => setIndependenceDrafts((current) => ({ ...current, [profile.ldap]: event.target.value }))} placeholder="Наприклад, самостійно" className="h-9" /><Button type="button" size="sm" variant="outline" disabled={independencePending === profile.ldap} onClick={() => void saveIndependence(profile)}>{independencePending === profile.ldap ? '…' : 'Зберегти'}</Button></div></td><td className="px-3 py-3"><Badge className={accessEnabled ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-100' : 'bg-slate-100 text-slate-600 hover:bg-slate-100'}>{accessEnabled ? 'Надано' : 'Вимкнено'}</Badge></td><td className="px-3 py-3"><div className="flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setPreviewLdap(profile.ldap)}>Перегляд</Button><Button type="button" size="sm" variant={accessEnabled ? 'outline' : 'default'} disabled={accessPending === profile.ldap || (ownAdmin && accessEnabled)} onClick={() => void setOperatorAccess(profile, !accessEnabled)}>{accessPending === profile.ldap ? '…' : ownAdmin && accessEnabled ? 'Ваш доступ' : accessEnabled ? 'Вимкнути' : 'Надати'}</Button></div></td></tr>; })}</tbody></table></div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Список операторів ще не надійшов із захищеного сервісу KPI.</p>}</article>
+              <article className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><h2 className="text-xl font-extrabold">Додати корисне посилання</h2><p className="mt-1 text-sm text-slate-500">Воно з’явиться лише для вказаного LDAP або для всіх операторів.</p><div className="mt-4 grid gap-3 md:grid-cols-[1fr_1.4fr_180px_auto]"><Input value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Назва, наприклад База знань" /><Input value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" inputMode="url" /><Input value={linkAudience} onChange={(event) => setLinkAudience(event.target.value.toUpperCase())} placeholder="ALL або LDAP" /><Button type="button" disabled={linkPending || !linkTitle || !linkUrl} onClick={() => void addHelpfulLink()}>{linkPending ? 'Додаємо…' : 'Додати'}</Button></div><p className="mt-2 text-xs text-slate-500">ALL — усім операторам. Для конкретної людини введіть її LDAP.</p></article>
+              {selectedProfile && <div className="mt-5"><OperatorPreview title="Перегляд кабінету оператора" profile={selectedProfile} rows={selectedRows} links={selectedLinks} /></div>}
             </TabsContent>}
           </Tabs>
         </section>
