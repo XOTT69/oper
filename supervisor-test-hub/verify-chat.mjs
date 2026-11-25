@@ -277,3 +277,21 @@ assert.equal(latest().method,'editMessageText');
 assert.match(latest().text,/Сторінка 2 із [2-9]/);
 console.log('PASS: operator block, restore, saved history, available-first single menu, per-operator deletion and full test removal.');
 console.log('PASS: numeric checkbox selection, author selection buttons, single-message study/test transitions, defer/return/scoring and stale/racing actions, independent study stage, gating, resume, source validation, learning copy, chat wizard/create/edit/copy/import, assignment confirmation and replay, tags, archive/resume, results/answers, draft persistence/cancel, private-admin authorization, Kyiv DST, Telegram payload limits. No external messages sent.');
+
+
+sqlite.prepare('UPDATE th_users SET operator_tag=? WHERE id=?').run('DEMO-LDAP','456');
+const extendedTest={...testPackage.tests[0],title:'Unified training fixture',verification_status:'VERIFIED'};
+const training={tests:[extendedTest],assignments:[{ldap:'demo-ldap',test_title:extendedTest.title}]};
+const unifiedPreview=await chatApi(env,'123',packageRoute+'/preview',training);
+assert.equal(unifiedPreview.assignments[0].action,'create');
+assert.equal(unifiedPreview.tests[0].verification_status,'VERIFIED');
+await assert.rejects(()=>chatApi(env,'123',packageRoute,{...training,assignments:[{ldap:'missing-ldap',test_title:extendedTest.title}]}),/LDAP/);
+const unified=await chatApi(env,'123',packageRoute,training);
+assert.equal(unified.created,1);assert.equal(unified.assigned,1);
+const repeated=await chatApi(env,'123',packageRoute,training);
+assert.equal(repeated.reused,1);assert.equal(repeated.skipped,1);
+const manual={tests:[{...extendedTest,title:'Manual review fixture',verification_status:'SOURCE_CHECKED'}]};
+assert.equal((await chatApi(env,'123',packageRoute+'/preview',manual)).requiresApproval,true);
+await assert.rejects(()=>chatApi(env,'123',packageRoute,manual),/SOURCE_CHECKED/);
+assert.equal((await chatApi(env,'123',packageRoute,{...manual,approve_source_checked:true})).created,1);
+console.log('PASS: unified training preview, LDAP matching, duplicate reuse and manual review gate.');
