@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Supervisor Test Hub</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f5f6fc;color:#292843;font:15px system-ui,sans-serif}
+main{max-width:930px;margin:auto;padding:15px}
+.hero{background:linear-gradient(120deg,#694fea,#429fe7);padding:24px;border-radius:24px;color:white}
+h1{font-size:25px;margin:0 0 8px}
+h2{font-size:20px}
+h3{font-size:16px}
+.card,.stat{background:white;border-radius:16px;padding:16px;margin:10px 0;box-shadow:0 5px 17px #2424460b}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.stat{margin:10px 0}
+.stat b{font-size:25px}
+.tabs{display:flex;overflow:auto;gap:5px;margin-top:12px}
+button{border:0;background:#6852db;color:white;border-radius:11px;padding:11px 14px;font:inherit;font-weight:600;margin:4px 4px 4px 0;cursor:pointer}
+button.alt,.tabs button{background:#ebe8ff;color:#5342bc}
+.tabs button.on{background:#6852db;color:white}
+button.danger{background:#fff0f2;color:#af2948}
+input,textarea,select{width:100%;font:inherit;border:1px solid #dadeed;border-radius:11px;padding:11px;margin:6px 0 12px;background:white}
+textarea{min-height:85px}
+label{font-size:13px;font-weight:650}
+.check{display:flex;align-items:center;gap:9px;padding:8px 0}
+.check input{width:auto;margin:0}
+.hidden{display:none!important}
+.muted{color:#74778e;font-size:12px}
+.error{color:#c12d4f}
+.question{border:1px solid #e0e2ed;border-radius:12px;padding:13px;margin:12px 0}
+.toolbar{display:flex;flex-wrap:wrap;gap:3px}
+.pill{border-radius:30px;padding:4px 8px;background:#efedff;font-size:12px;display:inline-block}
+@media(max-width:460px){.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<main>
+<header class="hero">
+<h1>🧠 Supervisor Test Hub</h1>
+<div>Кабінет керування тестами</div>
+</header>
+<div class="card" id="notice">Перевірка доступу…</div>
+
+<div id="app" class="hidden">
+<div id="stats" class="grid"></div>
+<nav class="tabs">
+<button class="on" data-tab="overview">Огляд</button>
+<button data-tab="tests">Тести</button>
+<button data-tab="edit">Редактор</button>
+<button data-tab="assign">Призначити</button>
+<button data-tab="results">Результати</button>
+<button data-tab="team">Команда</button>
+</nav>
+
+<section id="overview">
+<h2>📊 Команда</h2>
+<div id="recent"></div>
+</section>
+
+<section id="tests" class="hidden">
+<h2>📚 Бібліотека тестів</h2>
+<div id="testList"></div>
+</section>
+
+<section id="edit" class="hidden">
+<h2>✏️ Редактор тестів</h2>
+<div class="card">
+<label>Назва</label>
+<input id="title" placeholder="Стандарти сервісу">
+<label>Опис</label>
+<textarea id="description"></textarea>
+<label>Прохідний бал, %</label>
+<input id="pass" type="number" min="0" max="100" value="80">
+<label>Випадкова кількість питань (0 — усі)</label>
+<input id="draw" type="number" min="0" value="0">
+<div id="builder"></div>
+<button id="add" class="alt">+ Запитання</button>
+<button id="save">💾 Зберегти</button>
+<button id="reset" class="alt">Новий тест</button>
+</div>
+<div class="card">
+<h3>✨ Імпорт із Lumi / AI</h3>
+<p class="muted">Встав JSON тесту та перевір відповіді перед публікацією.</p>
+<textarea id="import" placeholder="{...}"></textarea>
+<button id="importBtn">Імпортувати</button>
+</div>
+</section>
+
+<section id="assign" class="hidden">
+<h2>📨 Призначення</h2>
+<div class="card">
+<label>Тест</label>
+<select id="testSelect"></select>
+<label>Оператори</label>
+<div id="people"></div>
+<button id="all" class="alt">Усі</button>
+<button id="none" class="alt">Очистити</button>
+<label>Дедлайн (час за Києвом)</label>
+<input id="deadline" type="datetime-local">
+<label>Повних спроб</label>
+<input id="tries" type="number" min="1" max="10" value="1">
+<label>Виправлень у спробі</label>
+<input id="corrections" type="number" min="0" max="10" value="0">
+<label class="check">
+<input type="checkbox" id="notify" checked>
+Надіслати оператору сповіщення
+</label>
+<button id="assignBtn">🚀 Призначити</button>
+</div>
+</section>
+
+<section id="results" class="hidden">
+<h2>📈 Результати</h2>
+<select id="filter">
+<option value="all">Усі</option>
+<option value="passed">Складено</option>
+<option value="failed">Не складено</option>
+<option value="active">У процесі</option>
+</select>
+<button id="csv">Експорт CSV</button>
+<div id="reports"></div>
+<div id="answers"></div>
+</section>
+
+<section id="team" class="hidden">
+<h2>👥 Оператори</h2>
+<div id="teamList"></div>
+</section>
+</div>
+</main>
+
+<script>
+(function(){
+'use strict';
+
+const el=id=>document.getElementById(id);
+const safe=s=>String(s??'').replace(
+  /[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
+);
+
+const app=window.Telegram?.WebApp;
+app?.ready();
+app?.expand();
+const init=app?.initData||'';
+
+let state={users:[],tests:[],assignments:[],reports:[]};
+let qs=[];
+let editing=null;
+
+function note(t,bad=false){
+  el('notice').textContent=(bad?'⚠️ ':'✅ ')+t;
+  el('notice').className='card '+(bad?'error':'');
+}
+
+async function api(path,method='GET',body){
+  let r=await fetch(path,{
+    method,
+    headers:{
+      'X-Telegram-Init-Data':init,
+      ...(body?{'Content-Type':'application/json'}:{})
+    },
+    ...(body?{body:JSON.stringify(body)}:{})
+  });
+  let d=await r.json();
+  if(!r.ok)throw Error(d.error||'Помилка API');
+  return d;
+}
+
+function tab(name){
+  document.querySelectorAll('[data-tab]').forEach(b=>
+    b.classList.toggle('on',b.dataset.tab===name)
+  );
+  ['overview','tests','edit','assign','results','team'].forEach(x=>
+    el(x).classList.toggle('hidden',x!==name)
+  );
+  if(name==='results')loadReports();
+}
+
+document.querySelectorAll('[data-tab]').forEach(b=>
+  b.onclick=()=>tab(b.dataset.tab)
+);
+
+function drawBuilder(){
+  el('builder').innerHTML=qs.map((q,i)=>
+    '<div class="question"><b>Питання '+(i+1)+'</b> '+
+    '<button class="danger" data-del="'+i+'">Видалити</button>'+
+    '<label>Текст питання</label>'+
+    '<textarea data-question="'+i+'">'+safe(q.question)+'</textarea>'+
+    q.options.map((o,n)=>
+      '<label>Варіант '+(n+1)+'</label>'+
+      '<input data-option="'+i+':'+n+'" value="'+safe(o)+'">'+
+      '<label class="check">'+
+      '<input type="checkbox" data-correct="'+i+':'+n+'" '+
+      (q.correct.includes(n)?'checked':'')+'>'+
+      ' Правильна відповідь</label>'
+    ).join('')+
+    '<button class="alt" data-addopt="'+i+'">+ Варіант</button>'+
+    '<label>Бали</label>'+
+    '<input type="number" min="1" data-points="'+i+'" value="'+q.points+'">'+
+    '<label>Пояснення</label>'+
+    '<textarea data-explain="'+i+'">'+safe(q.explanation||'')+'</textarea>'+
+    '</div>'
+  ).join('');
+
+  document.querySelectorAll('[data-del]').forEach(x=>
+    x.onclick=()=>{
+      qs.splice(+x.dataset.del,1);
+      drawBuilder();
+    }
+  );
+  document.querySelectorAll('[data-addopt]').forEach(x=>
+    x.onclick=()=>{
+      let q=qs[+x.dataset.addopt];
+      if(q.options.length<6){
+        q.options.push('');
+        drawBuilder();
+      }else note('Максимум 6 варіантів',true);
+    }
+  );
+  document.querySelectorAll('[data-question]').forEach(x=>
+    x.oninput=()=>qs[+x.dataset.question].question=x.value
+  );
+  document.querySelectorAll('[data-option]').forEach(x=>
+    x.oninput=()=>{
+      let [i,j]=x.dataset.option.split(':').map(Number);
+      qs[i].options[j]=x.value;
+    }
+  );
+  document.querySelectorAll('[data-correct]').forEach(x=>
+    x.onchange=()=>{
+      let [i,j]=x.dataset.correct.split(':').map(Number);
+      let s=new Set(qs[i].correct);
+      x.checked?s.add(j):s.delete(j);
+      qs[i].correct=[...s].sort((a,b)=>a-b);
+    }
+  );
+  document.querySelectorAll('[data-points]').forEach(x=>
+    x.oninput=()=>qs[+x.dataset.points].points=+x.value
+  );
+  document.querySelectorAll('[data-explain]').forEach(x=>
+    x.oninput=()=>qs[+x.dataset.explain].explanation=x.value
+  );
+}
+
+function add(){
+  qs.push({
+    question:'',
+    options:['','','',''],
+    correct:[],
+    points:1,
+    explanation:''
+  });
+  drawBuilder();
+}
+el('add').onclick=add;
+
+function reset(){
+  editing=null;
+  el('title').value='';
+  el('description').value='';
+  el('pass').value=80;
+  el('draw').value=0;
+  qs=[];
+  add();
+}
+el('reset').onclick=reset;
+
+async function refresh(){
+  state=await api('/api/data');
+
+  let a=state.assignments;
+  let done=a.filter(x=>x.passed===1);
+  let scored=a.filter(x=>x.best!==null);
+  let avg=scored.length
+    ?Math.round(scored.reduce((s,x)=>s+Number(x.best),0)/scored.length)+'%'
+    :'—';
+
+  el('stats').innerHTML=[
+    ['Призначено',a.length],
+    ['Склали',done.length],
+    ['Середній бал',avg]
+  ].map(x=>
+    '<div class="stat"><div class="muted">'+x[0]+
+    '</div><b>'+x[1]+'</b></div>'
+  ).join('');
+
+  el('recent').innerHTML=a.map(x=>
+    '<div class="card"><b>'+safe(x.name)+'</b> · '+safe(x.title)+
+    '<div class="muted">'+x.used+'/'+x.max_attempts+
+    ' спроб · '+(x.best??'—')+'%</div><p>'+
+    (x.passed?'✅ Складено':x.active?'🟡 Проходить':
+      x.best!==null?'❌ Не складено':'⏳ Очікує')+
+    '</p></div>'
+  ).join('')||'<div class="card">Призначень немає</div>';
+
+  el('testSelect').innerHTML=state.tests
+    .filter(x=>!x.archived)
+    .map(x=>
+      '<option value="'+safe(x.id)+'">'+safe(x.title)+'</option>'
+    ).join('');
+
+  el('people').innerHTML=state.users.map(x=>
+    '<label class="check"><input type="checkbox" data-person="'+
+    safe(x.id)+'"> '+safe(x.display_name||x.name)+
+    ' · '+safe(x.operator_tag||'')+'</label>'
+  ).join('');
+
+  drawTests();
+  drawTeam();
+}
+
+function drawTests(){
+  el('testList').innerHTML=state.tests.map(x=>
+    '<div class="card"><b>'+safe(x.title)+'</b> '+
+    (x.archived?'<span class="pill">Архів</span>':'')+
+    '<div class="muted">'+x.question_count+
+    ' питань · призначень: '+x.assigned+
+    ' · прохідний '+x.pass_percent+'%</div>'+
+    '<div class="toolbar">'+
+    '<button class="alt" data-edit="'+safe(x.id)+'">Редагувати</button>'+
+    '<button class="alt" data-copy="'+safe(x.id)+'">Копіювати</button>'+
+    '<button class="alt" data-archive="'+safe(x.id)+'">'+
+    (x.archived?'Відновити':'Архівувати')+'</button>'+
+    '<button class="danger" data-delete="'+safe(x.id)+'">Видалити</button>'+
+    '</div></div>'
+  ).join('')||'<div class="card">Немає тестів</div>';
+
+  document.querySelectorAll('[data-edit]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        let t=state.tests.find(x=>x.id===b.dataset.edit);
+        if(t.assigned){
+          note('Цей тест уже призначений. Зроби копію для редагування.',true);
+          return;
+        }
+        let d=await api('/api/test/detail?id='+encodeURIComponent(t.id));
+        editing=t.id;
+        el('title').value=d.test.title;
+        el('description').value=d.test.description;
+        el('pass').value=d.test.pass_percent;
+        el('draw').value=d.test.draw_count;
+        qs=d.questions;
+        drawBuilder();
+        tab('edit');
+      }catch(e){note(e.message,true);}
+    }
+  );
+
+  document.querySelectorAll('[data-copy]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        await api('/api/test/duplicate','POST',{id:b.dataset.copy});
+        await refresh();
+        note('Копію створено');
+      }catch(e){note(e.message,true);}
+    }
+  );
+
+  document.querySelectorAll('[data-archive]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        let t=state.tests.find(x=>x.id===b.dataset.archive);
+        await api('/api/test/archive','POST',{
+          id:t.id,
+          archived:!t.archived
+        });
+        await refresh();
+        note('Статус тесту змінено');
+      }catch(e){note(e.message,true);}
+    }
+  );
+
+  document.querySelectorAll('[data-delete]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        if(!confirm('Видалити тест безповоротно? Тести з історією проходжень видалити не можна.'))return;
+        await api('/api/test/delete','POST',{id:b.dataset.delete});
+        await refresh();
+        note('Тест видалено');
+      }catch(e){note(e.message,true);}
+    }
+  );
+}
+
+function drawTeam(){
+  el('teamList').innerHTML=state.users.map(x=>
+    '<div class="card"><b>'+safe(x.display_name||x.name)+'</b>'+
+    '<div class="muted">@'+safe(x.username)+' · ID '+safe(x.id)+'</div>'+
+    '<label>Власне ім’я</label>'+
+    '<input data-name="'+safe(x.id)+'" value="'+safe(x.display_name||'')+'">'+
+    '<label>Позначка / зміна</label>'+
+    '<input data-tag="'+safe(x.id)+'" value="'+safe(x.operator_tag||'')+'">'+
+    '<button data-save-person="'+safe(x.id)+'">Зберегти</button>'+
+    '</div>'
+  ).join('');
+
+  document.querySelectorAll('[data-save-person]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        let id=b.dataset.savePerson;
+        await api('/api/operator','POST',{
+          id,
+          display_name:document.querySelector('[data-name="'+id+'"]').value,
+          operator_tag:document.querySelector('[data-tag="'+id+'"]').value
+        });
+        await refresh();
+        note('Оператора оновлено');
+      }catch(e){note(e.message,true);}
+    }
+  );
+}
+
+el('save').onclick=async()=>{
+  try{
+    await api('/api/test/save','POST',{
+      id:editing||undefined,
+      title:el('title').value,
+      description:el('description').value,
+      pass_percent:+el('pass').value,
+      draw_count:+el('draw').value,
+      questions:qs
+    });
+    reset();
+    await refresh();
+    tab('tests');
+    note('Тест збережено');
+  }catch(e){note(e.message,true);}
+};
+
+el('importBtn').onclick=async()=>{
+  try{
+    let b=JSON.parse(el('import').value);
+    if(!confirm('Перевірено правильні відповіді?'))return;
+    await api('/api/test/save','POST',b);
+    el('import').value='';
+    await refresh();
+    note('Тест імпортовано');
+  }catch(e){note(e.message,true);}
+};
+
+el('all').onclick=()=>
+  document.querySelectorAll('[data-person]').forEach(x=>x.checked=true);
+
+el('none').onclick=()=>
+  document.querySelectorAll('[data-person]').forEach(x=>x.checked=false);
+
+el('assignBtn').onclick=async()=>{
+  try{
+    let people=[...document.querySelectorAll('[data-person]:checked')]
+      .map(x=>x.dataset.person);
+    let deadline=el('deadline').value;
+    if(!people.length)throw Error('Обери операторів.');
+
+    let r=await api('/api/assign','POST',{
+      test_id:el('testSelect').value,
+      user_ids:people,
+      deadline:deadline?new Date(deadline).toISOString():null,
+      max_attempts:+el('tries').value,
+      correction_limit:+el('corrections').value,
+      notify:el('notify').checked
+    });
+    await refresh();
+    note('Створено: '+r.created+', сповіщень: '+r.notified);
+  }catch(e){note(e.message,true);}
+};
+
+async function loadReports(){
+  try{
+    state.reports=(await api('/api/results')).items;
+    drawReports();
+  }catch(e){note(e.message,true);}
+}
+
+function drawReports(){
+  let filter=el('filter').value;
+  let x=state.reports.filter(r=>
+    filter==='all'||
+    (filter==='passed'&&r.passed===1)||
+    (filter==='failed'&&r.status==='finished'&&r.passed===0)||
+    (filter==='active'&&r.status==='active')
+  );
+
+  el('reports').innerHTML=x.map(r=>
+    '<div class="card"><b>'+safe(r.name)+'</b> · '+safe(r.title)+
+    '<p>'+(r.status==='active'?'🟡 У процесі':
+      r.passed?'✅ Складено':'❌ Не складено')+
+    ' · '+(r.percent??'—')+'%</p>'+
+    '<div class="muted">Бали '+r.score+'/'+r.max_score+'</div>'+
+    '<button data-answer="'+safe(r.id)+'">Відповіді</button></div>'
+  ).join('')||'<div class="card">Немає записів</div>';
+
+  document.querySelectorAll('[data-answer]').forEach(b=>
+    b.onclick=async()=>{
+      try{
+        let d=await api('/api/answers?id='+encodeURIComponent(b.dataset.answer));
+        el('answers').innerHTML='<h2>Розбір відповідей</h2>'+
+          d.items.map(a=>
+            '<div class="card"><b>'+safe(a.question)+'</b>'+
+            '<p>Обрано: '+safe(a.selected.join('; '))+'</p>'+
+            '<p>Правильно: '+safe(a.correct.join('; '))+'</p>'+
+            (a.right?'✅':'❌')+'</div>'
+          ).join('');
+      }catch(e){note(e.message,true);}
+    }
+  );
+}
+el('filter').onchange=drawReports;
+
+el('csv').onclick=()=>{
+  let rows=[
+    ['Оператор','Позначка','Тест','Відсоток','Статус','Дата'],
+    ...state.reports.map(x=>[
+      x.name,x.operator_tag,x.title,x.percent??'',
+      x.status==='active'?'У процесі':x.passed?'Складено':'Не складено',
+      x.finished_at||''
+    ])
+  ];
+  let csv=rows.map(r=>
+    r.map(x=>
+      '"'+String(x??'').replace(/^[=+@-]/,"'").replace(/"/g,'""')+'"'
+    ).join(',')
+  ).join('\r\n');
+
+  let blob=new Blob(['\uFEFF',csv],{type:'text/csv;charset=utf-8'});
+  let a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='supervisor-results.csv';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+};
+
+(async()=>{
+  if(!init){
+    note('Відкрий адмінку з Telegram-бота, не в браузері.',true);
+    return;
+  }
+  try{
+    await api('/api/me');
+    el('app').classList.remove('hidden');
+    reset();
+    await refresh();
+    note('Панель готова');
+  }catch(e){note(e.message,true);}
+})().catch(e=>note(e.message,true));
+
+})();
+</script>
+</body>
+</html>
