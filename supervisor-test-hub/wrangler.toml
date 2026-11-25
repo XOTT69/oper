@@ -1,0 +1,28 @@
+name = "supervisor-test-hub"
+main = "worker.js"
+compatibility_date = "2026-10-23"
+workers_dev = true
+preview_urls = false
+keep_vars = true
+
+[[d1_databases]]
+binding = "DB"
+database_id = "6acd7def-b3fb-43d8-aa8a-ba923c2440a5"
+
+[secrets]
+required = ["ADMIN_TELEGRAM_IDS", "BOT_TOKEN", "WEBHOOK_SECRET"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
+persist = true

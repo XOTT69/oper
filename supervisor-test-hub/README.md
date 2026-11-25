@@ -4,6 +4,21 @@
 
 Активна версія Cloudflare: `8b4e5ff2` (health: `3.8-operator-management`). Попередня версія: `2ea5e494`.
 
+## Деплой із GitHub
+
+Для чинного Worker `supervisor-test-hub` у **Settings → Builds** під’єднайте `XOTT69/oper`.
+
+| Налаштування | Значення |
+| --- | --- |
+| Production branch | `main` |
+| Root directory | `supervisor-test-hub` |
+| Build command | `node build.mjs && node verify.mjs && node verify-chat.mjs` |
+| Deploy command | `npx --yes wrangler@4.92.0 deploy` |
+| Build watch paths (Include) | `supervisor-test-hub/**` |
+| Non-production builds | Вимкнено |
+
+`wrangler.toml` використовує наявну D1 та перевіряє наявність чинних секретів Worker. Бот і вебпанель публікуються разом після успішної збірки. Стан розгортання можна перевірити в Cloudflare Builds і за адресою `/health`.
+
 ## Керування призначеннями та доступом
 
 - «Призначення» або «Результати» → «Видалити призначення» видаляє для вибраного оператора всі спроби, відповіді, результат і прогрес підготовки за цим призначенням.
