@@ -117,14 +117,16 @@ async function trainingPackageApi(payload,tests,db,preview){
   for(let i=0;i<plan.length;i++){
     const p=plan[i];
     if(p.action==='create'){
+      statements.push(db.prepare('DELETE FROM th_training_import_tests WHERE title_key=? AND NOT EXISTS(SELECT 1 FROM th_tests WHERE id=th_training_import_tests.test_id)').bind(trainingTitle(p.title)));
       statements.push(db.prepare('INSERT INTO th_training_import_tests(title_key,digest,test_id) VALUES(?,?,?)').bind(trainingTitle(p.title),p.digest,p.testId));
       statements.push(...testWriteStatements(db,tests[i],p.testId));
     }
     if(p.verification_status!=='UNSPECIFIED')statements.push(db.prepare('INSERT INTO th_training_verification(test_id,reported_status,reviewed) VALUES(?,?,?) ON CONFLICT(test_id) DO UPDATE SET reported_status=excluded.reported_status,reviewed=excluded.reviewed').bind(p.testId,p.verification_status,Number(p.verification_status==='SOURCE_CHECKED'&&payload.approve_source_checked===true)));
   }
   for(const a of targets.filter(x=>x.action==='create')){
+    statements.push(db.prepare('DELETE FROM th_training_import_assignments WHERE test_id=? AND user_id=? AND NOT EXISTS(SELECT 1 FROM th3_assignments WHERE test_id=? AND user_id=?)').bind(a.testId,a.userId,a.testId,a.userId));
     statements.push(db.prepare('INSERT INTO th_training_import_assignments(test_id,user_id) VALUES(?,?)').bind(a.testId,a.userId));
-    statements.push(db.prepare('INSERT INTO th3_assignments(id,test_id,user_id,deadline,max_attempts,correction_limit) VALUES(?,?,?,?,?,?)').bind(ID(),a.testId,a.userId,a.deadline,a.max_attempts,a.correction_limit));
+    statements.push(db.prepare('INSERT INTO th3_assignments(id,test_id,user_id,deadline,max_attempts,correction_limit) VALUES(?,(SELECT id FROM th_tests WHERE id=? AND NOT EXISTS(SELECT 1 FROM th3_testmeta WHERE test_id=? AND archived=1)),(SELECT id FROM th_users WHERE id=? AND UPPER(TRIM(operator_tag))=UPPER(?) AND NOT EXISTS(SELECT 1 FROM th_blocked_operators WHERE user_id=?)),?,?,?)').bind(ID(),a.testId,a.testId,a.userId,a.ldap,a.userId,a.deadline,a.max_attempts,a.correction_limit));
   }
   if(statements.length)await db.batch(statements);
   return J({created:plan.filter(p=>p.action==='create').length,reused:plan.filter(p=>p.action==='reuse').length,questionCount,assigned:targets.filter(a=>a.action==='create').length,skipped:targets.filter(a=>a.action==='skip').length});
@@ -137,6 +139,42 @@ async function testPackageApi(req,db,preview){
     const input=JSON.parse(new TextDecoder().decode(bytes));
     const tests=normalizeTestPackage(input);
     const payload=Array.isArray(input)?{tests:input}:input;
+    if(payload.assignments===undefined&&!payload.tests.some(t=>t.verification_status!==undefined))return legacyTestPackageApi(new Request(req.url,{method:'POST',body:bytes}),db,preview);
     return await trainingPackageApi(payload,tests,db,preview);
   }catch(error){return J({error:error instanceof SyntaxError?'Перевірте формат JSON.':error.message},400);}
+}
+
+async function legacyTestPackageApi(req, db, preview) {
+  if (Number(req.headers.get('Content-Length')) > packageSizeLimit) {
+    return J({ error: 'Розмір пакета має бути до 1 МБ.' }, 413);
+  }
+  const bytes = await req.arrayBuffer();
+  if (bytes.byteLength > packageSizeLimit) return J({ error: 'Розмір пакета має бути до 1 МБ.' }, 413);
+
+  let tests;
+  try { tests = normalizeTestPackage(JSON.parse(new TextDecoder().decode(bytes))); }
+  catch (error) {
+    return J({ error: error instanceof SyntaxError ? 'Перевірте формат JSON.' : error.message }, 400);
+  }
+
+  const questionCount = tests.reduce((count, test) => count + test.questions.length, 0);
+  if (preview) return J({ tests, questionCount });
+
+  await db.prepare('CREATE TABLE IF NOT EXISTS th_test_package_imports (digest TEXT PRIMARY KEY)').run();
+  const canonical = JSON.stringify(tests.map(test => JSON.stringify(test)).sort());
+  const digest = await browserDigest(canonical);
+  const receipt = () => db.prepare('SELECT 1 FROM th_test_package_imports WHERE digest=?').bind(digest).first();
+  const duplicate = () => J({ error: 'Цей пакет уже імпортовано. Його тести можна знайти в бібліотеці.' }, 409);
+  if (await receipt()) return duplicate();
+
+  const statements = [db.prepare('INSERT INTO th_test_package_imports(digest) VALUES(?)').bind(digest)];
+  for (const test of tests) statements.push(...testWriteStatements(db, test, ID()));
+  try {
+    await db.batch(statements);
+  } catch (error) {
+    // A simultaneous retry can win the same unique receipt before this transaction starts.
+    if (await receipt()) return duplicate();
+    throw error;
+  }
+  return J({ created: tests.length, questionCount });
 }
