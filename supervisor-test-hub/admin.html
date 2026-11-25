@@ -262,6 +262,7 @@ let qs=[];
 let editing=null;
 let saving=false;
 let previewedPackage=null;
+let packageRequiresApproval=false;
 let packageBusy=false;
 
 /* BULK_IMPORT_PARSER */
@@ -725,6 +726,7 @@ el('save').onclick=async()=>{
 
 function clearPackagePreview(){
   previewedPackage=null;
+  packageRequiresApproval=false;
   el('jsonPreview').classList.add('hidden');
   el('packageTests').replaceChildren();
 }
@@ -778,13 +780,15 @@ el('importBtn').onclick=async()=>{
     if(Array.isArray(data)||Array.isArray(data?.tests)){
       const result=await api('/api/test/import/preview','POST',data);
       previewedPackage=data;
-      el('jsonSummary').textContent='Тестів: '+result.tests.length+' · Питань: '+result.questionCount;
+      packageRequiresApproval=!!result.requiresApproval;
+      el('jsonSummary').textContent='Тестів: '+result.tests.length+' · Питань: '+result.questionCount+' · Призначень: '+(result.assignments||[]).length;
       el('packageTests').innerHTML=result.tests.map(test=>
-        '<details><summary>'+safe(test.title)+' · '+test.questions.length+' питань</summary><ol>'+
+        '<details><summary>'+safe(test.title)+' · '+safe(test.verification_status||'')+' · '+(test.action==='reuse'?'Існуючий':'Новий')+' · '+test.questions.length+' питань</summary><ol>'+
         test.questions.map(q=>'<li>'+safe(q.question)+'<br><strong>Правильні:</strong> '+
           q.correct.map(i=>safe(q.options[i])).join(' · ')+'</li>').join('')+
         '</ol></details>'
-      ).join('');
+      ).join('')+(result.assignments||[]).map(a=>'<p>'+safe(a.ldap)+' · '+safe(a.operator_name)+' — '+safe(a.test_title)+' · '+(a.action==='skip'?'Вже призначено':'Буде призначено')+'</p>').join('');
+      el('savePackage').textContent=(result.assignments||[]).length?'Імпортувати та призначити':'Додати тести до бібліотеки';
       el('jsonPreview').classList.remove('hidden');
       el('jsonSummary').focus();
       return;
@@ -813,15 +817,16 @@ el('importBtn').onclick=async()=>{
 
 el('savePackage').onclick=async()=>{
   if(packageBusy||!previewedPackage)return;
+  if(packageRequiresApproval&&!confirm('Підтверджуєте ручну перевірку всіх SOURCE_CHECKED тестів?'))return;
   lockPackageImport(true);
   editorStatus('jsonStatus','Додаємо тести до бібліотеки…');
   try{
-    const result=await api('/api/test/import','POST',previewedPackage);
+    const result=await api('/api/test/import','POST',packageRequiresApproval?{...previewedPackage,approve_source_checked:true}:previewedPackage);
     clearPackageImport();
     el('testSearch').value='';
     el('testStatus').value='active';
     tab('tests');
-    note('Імпортовано тестів: '+result.created+' · Питань: '+result.questionCount);
+    note('Створено: '+result.created+' · Повторно використано: '+(result.reused||0)+' · Призначено: '+(result.assigned||0)+' · Пропущено: '+(result.skipped||0));
     try{await refresh();}
     catch{note('Тести збережено. Оновіть сторінку, щоб побачити їх у бібліотеці.',true);}
   }catch(e){editorStatus('jsonStatus',e.message,true);}
