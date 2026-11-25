@@ -95,7 +95,7 @@ s=s.replace("  if(path==='/api/test/save'&&method==='POST'){",
   "  if(method==='POST'&&(path==='/api/test/import/preview'||path==='/api/test/import')){\n"+
   "    return testPackageApi(req,db,path.endsWith('/preview'));\n  }\n\n"+
   "  if(path==='/api/test/save'&&method==='POST'){");
-s=s.replace("version:'3.7-test-packages'","version:'3.8-operator-management'");
+s=s.replace("version:'3.7-test-packages'","version:'3.8.1-git-build'");
 const operatorSource=fs.readFileSync(new URL('operator-management.js',root),'utf8');
 const listStart=s.indexOf('async function list(env,user){');
 const callbackStart=s.indexOf('async function callback(env,q){',listStart);

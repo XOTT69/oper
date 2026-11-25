@@ -1616,7 +1616,7 @@ export default {
   async fetch(req,env){
     let path=new URL(req.url).pathname;
     try{
-      if(path==='/health')return J({ok:true,version:'3.8-operator-management'});
+      if(path==='/health')return J({ok:true,version:'3.8.1-git-build'});
 
       if(path==='/'&&req.method==='GET'){
         return new Response(PAGE,{
